@@ -88,6 +88,16 @@ pub trait Module {
     fn underline(&self, _look: &Look) -> Option<ratatui::style::Color> {
         None
     }
+    /// Los botones de adentro, cada uno con su texto y si es el activo (los
+    /// workspaces): la barra los acomoda con su propio relleno en pixeles
+    /// (`button-padding`, `active-padding` del look).
+    fn buttons(&self, _look: &Look, _out: &str) -> Option<Vec<(Line<'static>, bool)>> {
+        None
+    }
+    /// Un clic o la rueda en el botón `n` de `buttons` (None: entre botones).
+    fn act_button(&mut self, act: Act, _n: Option<usize>, out: &str) {
+        self.act_on(act, 0, out)
+    }
     /// El botón activo de adentro en el monitor `out` (el workspace activo),
     /// para marcarlo con la línea del look.
     fn active_part(&self, _out: &str) -> Option<Part> {

@@ -65,8 +65,13 @@ struct Slot {
     start: f32,
     width: f32,
     clip: f32,
-    /// las celdas de su texto
+    /// las celdas de su texto, y su ancho en pixeles (con botones, el de
+    /// todos con su relleno)
     full: u16,
+    tw: f32,
+    /// sus botones (los workspaces): de dónde a dónde, en pixeles desde su
+    /// texto, y si es el activo
+    buttons: Vec<(f32, f32, bool)>,
     /// el ancho de una celda de este módulo (su tamaño de letra)
     cw: f32,
     /// pixeles: margen izquierdo y relleno a cada lado del texto (el margen
@@ -94,6 +99,8 @@ struct Hover {
     slot: usize,
     /// todo el módulo (su caja), o de qué celda a qué celda de su texto
     whole: bool,
+    /// un botón: de dónde a dónde, en pixeles (manda sobre from/to)
+    px: Option<(f32, f32)>,
     from: u16,
     to: u16,
     fg: Option<Color>,
@@ -353,7 +360,24 @@ impl App {
         let full: Vec<Option<u16>> = lines.iter().map(|(_, l)| l.as_ref().map(|l| l.width() as u16)).collect();
         let cws: Vec<f32> = self.painter_of.iter().map(|p| p.map_or(cw, |j| self.painters[j].1.cw)).collect();
         let padx: Vec<f32> = self.pills.iter().zip(&cws).map(|(p, cw)| p.padding.unwrap_or(self.bar.pad as f32 * cw)).collect();
-        let outer = |i: usize| full[i].map_or(0.0, |c| c as f32 * cws[i] + 2.0 * padx[i] + self.pills[i].margin[1] + self.pills[i].margin[3]);
+        // los módulos con botones (los workspaces), si el look les da relleno en pixeles
+        let btns: Vec<Option<Vec<(ratatui::text::Line<'static>, bool)>>> = self
+            .modules
+            .iter()
+            .zip(&self.pills)
+            .map(|((_, m), p)| p.button_padding.and_then(|_| m.buttons(look, &o.name)))
+            .collect();
+        let bpad = |i: usize, on: bool| {
+            let p = &self.pills[i];
+            if on { p.active_padding.or(p.button_padding).unwrap_or(0.0) } else { p.button_padding.unwrap_or(0.0) }
+        };
+        let tw: Vec<f32> = (0..full.len())
+            .map(|i| match &btns[i] {
+                Some(b) => b.iter().map(|(l, on)| l.width() as f32 * cws[i] + 2.0 * bpad(i, *on)).sum(),
+                None => full[i].unwrap_or(0) as f32 * cws[i],
+            })
+            .collect();
+        let outer = |i: usize| full[i].map_or(0.0, |_| tw[i] + 2.0 * padx[i] + self.pills[i].margin[1] + self.pills[i].margin[3]);
         // lo que se ve de cada uno (los que salen de un cajón, a medio abrir):
         // (visible, escondido a la izquierda), en pixeles
         let mut shown: Vec<(f32, f32)> = (0..full.len()).map(|i| (outer(i), 0.0)).collect();
@@ -384,7 +408,16 @@ impl App {
             for i in items {
                 let (width, clip) = shown[i];
                 let p = &self.pills[i];
-                slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap(), cw: cws[i], ml: p.margin[3], padx: padx[i] });
+                let mut buttons = Vec::new();
+                if let Some(b) = &btns[i] {
+                    let mut bx = 0.0;
+                    for (l, on) in b {
+                        let bw = l.width() as f32 * cws[i] + 2.0 * bpad(i, *on);
+                        buttons.push((bx, bx + bw, *on));
+                        bx += bw;
+                    }
+                }
+                slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap(), tw: tw[i], buttons, cw: cws[i], ml: p.margin[3], padx: padx[i] });
                 x += width + gap;
             }
         }
@@ -410,7 +443,7 @@ impl App {
             .iter()
             .map(|sl| {
                 let x0 = (sl.start - sl.clip + sl.ml).max(sl.start);
-                let x1 = (sl.start - sl.clip + sl.ml + sl.full as f32 * sl.cw + 2.0 * sl.padx).min(sl.start + sl.width);
+                let x1 = (sl.start - sl.clip + sl.ml + sl.tw + 2.0 * sl.padx).min(sl.start + sl.width);
                 (x0, x1)
             })
             .collect();
@@ -448,12 +481,17 @@ impl App {
             }
             p.paint(&mut pix, look, px(x0), px(mt), px(x1) - px(x0), h as f32 - px(mt) - px(mb), sf, alpha);
         }
-        if let Some(Hover { slot, whole: false, from, to, bg: Some(bg), .. }) = hov {
+        if let Some(Hover { slot, whole: false, from, to, px: bpx, bg: Some(bg), .. }) = hov {
             let sl = &o.slots[slot];
-            let x0 = (sl.text_x() + from as f32 * sl.cw).max(sl.start);
-            let x1 = (sl.text_x() + to as f32 * sl.cw).min(sl.start + sl.width);
+            let p = &self.pills[sl.module];
+            let (x0, x1, top, bot, r) = match bpx {
+                // un botón: redondeado como el activo, del alto de la caja
+                Some((a, b)) => (a, b, p.margin[0] + p.width, p.margin[2] + p.width, p.button_radius.unwrap_or(self.bar.radius)),
+                None => (sl.text_x() + from as f32 * sl.cw, sl.text_x() + to as f32 * sl.cw, 0.0, 0.0, self.bar.radius),
+            };
+            let (x0, x1) = (x0.max(sl.start), x1.min(sl.start + sl.width));
             if x1 > x0 {
-                rounded(&mut pix, px(x0), 0.0, px(x1) - px(x0), h as f32, self.bar.radius * sf, bg, alpha);
+                rounded(&mut pix, px(x0), px(top), px(x1) - px(x0), h as f32 - px(top) - px(bot), r * sf, bg, alpha);
             }
         }
 
@@ -471,9 +509,10 @@ impl App {
             let pill = &self.pills[sl.module];
             let line = active[k].filter(|_| pill.active_border.is_none() && pill.active_bg.is_none()).map(|(c, part)| {
                 let c = pill.active_color.as_deref().and_then(|v| fmt::color(look, v)).unwrap_or(c);
-                match part {
-                    Some((a, w, _)) => (c, sl.text_x() + a as f32 * sl.cw, sl.text_x() + (a + w) as f32 * sl.cw),
-                    None => (c, x0, x1),
+                match (part, sl.buttons.iter().find(|b| b.2)) {
+                    (Some(_), Some(&(a, b, _))) => (c, sl.text_x() + a, sl.text_x() + b),
+                    (Some((a, w, _)), None) => (c, sl.text_x() + a as f32 * sl.cw, sl.text_x() + (a + w) as f32 * sl.cw),
+                    (None, _) => (c, x0, x1),
                 }
             });
             let ly = if pill.line_top { pill.margin[0] * sf } else { h as f32 - (pill.margin[2] + 2.0) * sf };
@@ -485,6 +524,39 @@ impl App {
                     paint.set_color_rgba8(r_, g, b, 255);
                 }
                 pix.fill_rect(r, &paint, tiny_skia::Transform::identity(), None);
+            }
+            // con botones: cada uno en su lugar, con el fondo redondo del activo
+            if let Some(b) = &btns[sl.module]
+                && sl.clip <= 0.01
+            {
+                let (top, bot) = (pill.margin[0] + pill.width, pill.margin[2] + pill.width);
+                let abg = pill.active_bg.as_deref().and_then(|v| fmt::color(look, v));
+                for (n, (l, on)) in b.iter().enumerate() {
+                    let (bx0, bx1, _) = sl.buttons[n];
+                    let (bx0, bx1) = (sl.text_x() + bx0, sl.text_x() + bx1);
+                    if *on && let Some(c) = abg {
+                        rounded(&mut pix, px(bx0), px(top), px(bx1) - px(bx0), h as f32 - px(top) - px(bot), pill.button_radius.unwrap_or(0.0) * sf, c, 1.0);
+                    }
+                    let w = l.width() as u16;
+                    let mut one = Buffer::empty(Rect::new(0, 0, w.max(1), 1));
+                    one.set_line(0, 0, l, w);
+                    if let Some(Hover { slot, px: Some(_), fg: Some(fg), .. }) = hov
+                        && slot == k
+                        && o.hovered.and_then(|h| h.1) == Some(n as u16)
+                    {
+                        for x in 0..w {
+                            one[(x, 0)].set_fg(fg);
+                        }
+                    }
+                    if pill.bold {
+                        for x in 0..w {
+                            one[(x, 0)].modifier.insert(ratatui::style::Modifier::BOLD);
+                        }
+                    }
+                    let pad = (bx1 - bx0 - w as f32 * sl.cw) / 2.0;
+                    painter.cells(&mut pix, &one, look, px(bx0 + pad), oy, sf);
+                }
+                continue;
             }
             let Some(line) = &lines[sl.module].1 else { continue };
             let mut one = Buffer::empty(Rect::new(0, 0, sl.full.max(1), 1));
@@ -506,7 +578,7 @@ impl App {
                     cell.modifier.insert(ratatui::style::Modifier::BOLD);
                 }
             }
-            if let Some(Hover { slot, from, to, fg, bg, whole }) = hov
+            if let Some(Hover { slot, from, to, fg, bg, whole, .. }) = hov
                 && slot == k
             {
                 let (from, to) = if whole { (0, sl.full) } else { (from, to.min(sl.full)) };
@@ -598,7 +670,13 @@ impl App {
         let rel = sl.col(x);
         let m = sl.module;
         let name = self.outs[i].name.clone();
-        self.modules[m].1.act_on(act, rel, &name);
+        if !sl.buttons.is_empty() {
+            let tx = sl.text_x();
+            let n = sl.buttons.iter().position(|b| x >= tx + b.0 && x < tx + b.1);
+            self.modules[m].1.act_button(act, n, &name);
+        } else {
+            self.modules[m].1.act_on(act, rel, &name);
+        }
         self.sync_idle();
         self.tip_reset(false);
         // lo que cambia solo con el clic (el reloj largo): de una vez
@@ -653,6 +731,11 @@ impl App {
         let x = o.hover_x?;
         let k = self.slot_at(i, x)?;
         let sl = &o.slots[k];
+        if !sl.buttons.is_empty() {
+            let tx = sl.text_x();
+            let n = sl.buttons.iter().position(|b| x >= tx + b.0 && x < tx + b.1)?;
+            return Some((k, Some((n as u16, 1, sl.buttons[n].2))));
+        }
         Some((k, self.modules[sl.module].1.part_on(sl.col(x), &o.name)))
     }
 
@@ -668,7 +751,9 @@ impl App {
                     return None;
                 }
                 let (fg, bg) = if active { ("active-fg", "active-bg") } else { ("fg", "bg") };
-                Some(Hover { slot: k, whole: false, from: a, to: a + w, fg: c(h, fg), bg: c(h, bg) })
+                // un botón en pixeles (a es su número)
+                let bpx = sl.buttons.get(a as usize).map(|b| (sl.text_x() + b.0, sl.text_x() + b.1));
+                Some(Hover { slot: k, whole: false, from: a, to: a + w, px: bpx, fg: c(h, fg), bg: c(h, bg) })
             }
             None => {
                 let h = &self.bar.hover;
@@ -677,7 +762,7 @@ impl App {
                 if h.is_null() || !listed || name == "workspaces" {
                     return None;
                 }
-                Some(Hover { slot: k, whole: true, from: 0, to: sl.full, fg: c(h, "fg"), bg: c(h, "bg") })
+                Some(Hover { slot: k, whole: true, from: 0, to: sl.full, px: None, fg: c(h, "fg"), bg: c(h, "bg") })
             }
         }
     }

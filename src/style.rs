@@ -113,6 +113,9 @@ pub struct Pill {
     /// los fondos de sus botones (el workspace activo), redondeados y de todo
     /// el alto, como el border-radius de `#workspaces button`
     pub button_radius: Option<f32>,
+    /// el relleno de cada botón y el del activo, en pixeles (los workspaces)
+    pub button_padding: Option<f32>,
+    pub active_padding: Option<f32>,
     /// lo activo (la app enfocada, el workspace activo): una línea arriba o
     /// abajo (`active-line`, de `active-color` o del color del módulo), o un
     /// borde de otro color en su caja (`active-border`)
@@ -179,6 +182,12 @@ impl Pill {
         }
         if let Some(r) = f(v, "button-radius") {
             p.button_radius = Some(r);
+        }
+        if let Some(x) = f(v, "button-padding") {
+            p.button_padding = Some(x);
+        }
+        if let Some(x) = f(v, "active-padding") {
+            p.active_padding = Some(x);
         }
         if let Some(side) = s(v, "active-line") {
             p.line_top = side == "top";

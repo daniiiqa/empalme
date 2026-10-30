@@ -171,6 +171,39 @@ impl Module for Workspaces {
         self.part_for(col, self.active_on(out))
     }
 
+    fn buttons(&self, look: &Look, out: &str) -> Option<Vec<(Line<'static>, bool)>> {
+        let active = self.active_on(out);
+        let t = look.theme;
+        let c = |k: &str| self.conf.str(k).and_then(|v| crate::fmt::color(look, &v));
+        let (busy_fg, empty_fg, active_fg) = (c("fg").unwrap_or(t.fg), c("empty-fg").unwrap_or(t.muted), c("active-fg"));
+        Some(
+            self.shown(active)
+                .iter()
+                .map(|&(id, busy)| {
+                    let on = id == active;
+                    let fg = if on { active_fg.unwrap_or(t.fg) } else if busy { busy_fg } else { empty_fg };
+                    // sin el relleno de celdas: la barra pone el suyo en pixeles
+                    let markup = self.label(id, on, busy);
+                    let pad = " ".repeat(self.conf.num("button-pad").unwrap_or(0.0).max(0.0) as usize);
+                    let markup = markup.strip_prefix(pad.as_str()).and_then(|m| m.strip_suffix(pad.as_str())).unwrap_or(&markup).to_string();
+                    (crate::fmt::line(&markup, Style::new().fg(fg), look), on)
+                })
+                .collect(),
+        )
+    }
+
+    fn act_button(&mut self, act: Act, n: Option<usize>, out: &str) {
+        let shown = self.shown(self.active_on(out));
+        match act {
+            Act::Left => {
+                if let Some((id, _)) = n.and_then(|n| shown.get(n)) {
+                    script("Hypr.sh", &["workspace", &id.to_string()]);
+                }
+            }
+            _ => self.act_for(act, u16::MAX, 0),
+        }
+    }
+
     fn active_part(&self, out: &str) -> Option<Part> {
         let active = self.active_on(out);
         let mut x = 0u16;
