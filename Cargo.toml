@@ -1,0 +1,19 @@
+[package]
+name = "empalme"
+version = "0.1.0"
+edition = "2024"
+description = "La barra de discada: el look del rice, como rola, vato, arre y taco"
+license = "MIT"
+
+[dependencies]
+discada-kit = { path = "../discada-kit", features = ["paint"] }
+libc = "0.2"
+ratatui = "0.29"
+serde_json = "1"
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
+tiny-skia = "0.12.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
