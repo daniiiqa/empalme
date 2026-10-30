@@ -4,10 +4,16 @@
 
 pub mod audio;
 pub mod battery;
+pub mod bluetooth;
 pub mod clock;
+pub mod network;
+pub mod power;
+pub mod system;
 pub mod workspaces;
 
+use crate::fmt::{Conf, Val, fill, line};
 use discada_kit::look::Look;
+use ratatui::style::Style;
 use ratatui::text::Line;
 use std::process::{Command, Stdio};
 
@@ -24,6 +30,8 @@ pub enum Act {
 pub enum Ev {
     Hypr(String),
     Audio,
+    Bluetooth(bluetooth::State),
+    /// una vez por segundo, justo al cambiar el segundo
     Tick,
 }
 
@@ -36,14 +44,53 @@ pub trait Module {
     fn update(&mut self, ev: &Ev) -> bool;
 }
 
-pub fn make(name: &str) -> Option<Box<dyn Module>> {
-    Some(match name {
+/// El módulo `name` (`cpu`, o `cpu#otro` para tener dos con distinta
+/// config) con lo que diga su `[bar.modules.<name>]`.
+pub fn make(name: &str, conf: Conf) -> Option<Box<dyn Module>> {
+    let kind = name.split('#').next().unwrap_or(name);
+    Some(match kind {
         "workspaces" => Box::new(workspaces::Workspaces::new()),
-        "clock" => Box::new(clock::Clock::new()),
+        "clock" => Box::new(clock::Clock::new(conf)),
         "battery" => Box::new(battery::Battery::new()),
-        "audio" => Box::new(audio::Audio::new()),
+        "audio" => Box::new(audio::Audio::new(audio::Kind::Sink, conf)),
+        "mic" => Box::new(audio::Audio::new(audio::Kind::Source, conf)),
+        "cpu" => Box::new(system::System::new(system::Kind::Cpu, conf)),
+        "memory" => Box::new(system::System::new(system::Kind::Memory, conf)),
+        "disk" => Box::new(system::System::new(system::Kind::Disk, conf)),
+        "temperature" => Box::new(system::System::new(system::Kind::Temperature, conf)),
+        "network" => Box::new(network::Network::new(conf)),
+        "bluetooth" => Box::new(bluetooth::Bluetooth::new(conf)),
+        "power" => Box::new(power::Power::new(conf)),
         _ => return None,
     })
+}
+
+/// El formato de un módulo: el del look, o el de empalme (con íconos o con
+/// texto, según el look; al texto le toca el caso del look, no a los `{…}`).
+pub fn template(look: &Look, conf: &Conf, state: &str, icons: &str, text: &str) -> String {
+    if let Some(f) = conf.format(state) {
+        return f;
+    }
+    if look.icons {
+        return icons.to_string();
+    }
+    let mut out = String::new();
+    let mut inside = false;
+    for c in text.chars() {
+        match c {
+            '{' => inside = true,
+            '}' => inside = false,
+            _ => {}
+        }
+        if inside || c == '}' { out.push(c) } else { out.push_str(&look.tx(&c.to_string())) }
+    }
+    out
+}
+
+/// Relleno y como renglón; vacío: el módulo no se ve (como en waybar).
+pub fn show(look: &Look, tpl: &str, vals: &[(&str, Val)], base: Style) -> Option<Line<'static>> {
+    let s = fill(tpl, vals);
+    if s.trim().is_empty() { None } else { Some(line(&s, base, look)) }
 }
 
 /// Un script de discada (hypr/scripts) sin esperarlo.
@@ -59,13 +106,4 @@ pub fn spawn(cmd: &mut Command) {
             let _ = child.wait();
         });
     }
-}
-
-/// Idioma de discada (hypr/discada.conf → LANGUAGE=es|en).
-pub fn spanish() -> bool {
-    let f = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/hypr/discada.conf");
-    std::fs::read_to_string(f)
-        .ok()
-        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("LANGUAGE=").map(|v| v.trim_start().starts_with("es"))))
-        .unwrap_or(false)
 }

@@ -23,6 +23,8 @@ pub struct Bar {
     pub margin: [i32; 4],
     pub style: Style,
     pub radius: f32,
+    /// tamaño de la letra en pixeles; None: el de kitty
+    pub font_size: Option<f32>,
     /// celdas de aire a cada lado del contenido de un módulo
     pub pad: u16,
     /// celdas entre módulos
@@ -30,6 +32,8 @@ pub struct Bar {
     pub left: Vec<String>,
     pub center: Vec<String>,
     pub right: Vec<String>,
+    /// `[bar.modules.<nombre>]`: los formatos y ajustes de cada módulo
+    pub modules: Value,
 }
 
 impl Default for Bar {
@@ -40,11 +44,15 @@ impl Default for Bar {
             margin: [8, 8, 0, 8],
             style: Style::Islands,
             radius: 6.0,
+            font_size: None,
             pad: 1,
             gap: 1,
             left: vec!["workspaces".into()],
             center: vec!["clock".into()],
-            right: vec!["audio".into(), "battery".into()],
+            right: ["temperature", "cpu", "memory", "disk", "audio", "mic", "network", "bluetooth", "battery", "power"]
+                .map(String::from)
+                .to_vec(),
+            modules: Value::Null,
         }
     }
 }
@@ -82,6 +90,7 @@ pub fn load() -> Bar {
     if let Some(r) = v["radius"].as_f64() {
         b.radius = r as f32;
     }
+    b.font_size = v["font-size"].as_f64().map(|f| f.clamp(6.0, 60.0) as f32);
     if let Some(p) = v["pad"].as_u64() {
         b.pad = p as u16;
     }
@@ -91,5 +100,6 @@ pub fn load() -> Bar {
     b.left = list("left").unwrap_or(b.left);
     b.center = list("center").unwrap_or(b.center);
     b.right = list("right").unwrap_or(b.right);
+    b.modules = v["modules"].clone();
     b
 }

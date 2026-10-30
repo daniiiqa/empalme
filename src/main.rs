@@ -8,6 +8,7 @@
 //! Por ahora corre junto a waybar: `pkill -SIGUSR1 waybar` esconde waybar.
 
 mod bar;
+mod fmt;
 mod hypr;
 mod modules;
 
@@ -39,7 +40,7 @@ use smithay_client_toolkit::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -80,7 +81,7 @@ fn build(bar: &Bar) -> Vec<(u8, Box<dyn Module>)> {
     let mut out = Vec::new();
     for (sect, names) in [&bar.left, &bar.center, &bar.right].into_iter().enumerate() {
         for name in names {
-            if let Some(m) = modules::make(name) {
+            if let Some(m) = modules::make(name, fmt::Conf(bar.modules[name.as_str()].clone())) {
                 out.push((sect as u8, m));
             }
         }
@@ -212,14 +213,15 @@ impl App {
 
     /// Otro look u otra barra: releer y volver a armar.
     fn reload(&mut self, new_bar: bool) {
-        self.painter = Painter::new();
         if new_bar {
             self.bar = bar::load();
+            self.painter = Painter::sized(self.bar.font_size);
             self.modules = build(&self.bar);
             self.layer = None;
             self.pool = None;
             self.create_layer();
         } else {
+            self.painter = Painter::sized(self.bar.font_size);
             self.redraw();
         }
     }
@@ -253,7 +255,10 @@ fn run() -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     hypr::events(tx.clone());
-    modules::audio::watch(tx);
+    modules::audio::watch(tx.clone());
+    modules::bluetooth::watch(tx);
+    // los nombres de días y meses del reloj, en el idioma del sistema
+    unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
 
     let bar = bar::load();
     let mut app = App {
@@ -272,7 +277,7 @@ fn run() -> Result<(), String> {
         pointer_x: 0.0,
         scroll: 0.0,
         look: Look::load("empalme"),
-        painter: Painter::new(),
+        painter: Painter::sized(bar.font_size),
         modules: build(&bar),
         bar,
         slots: Vec::new(),
@@ -280,12 +285,16 @@ fn run() -> Result<(), String> {
     };
     app.create_layer();
 
-    let mut last_tick = Instant::now();
+    let mut last_sec = 0;
     let mut bar_stamp = bar::stamp();
     loop {
-        event_loop.dispatch(Duration::from_millis(500), &mut app).map_err(|e| e.to_string())?;
-        if last_tick.elapsed() >= Duration::from_secs(1) {
-            last_tick = Instant::now();
+        // despertar justo al cambiar el segundo, para que el reloj no se salte uno
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let wait = Duration::from_millis(1000 - now.subsec_millis() as u64 + 2);
+        event_loop.dispatch(wait, &mut app).map_err(|e| e.to_string())?;
+        let sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        if sec != last_sec {
+            last_sec = sec;
             app.on_ev(Ev::Tick);
             let look_changed = app.look.refresh();
             let stamp = bar::stamp();
