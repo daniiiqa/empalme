@@ -7,6 +7,7 @@ use discada_kit::look::Look;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const PS: &str = "/sys/class/power_supply";
@@ -29,6 +30,26 @@ enum State {
 pub struct Battery {
     now: Option<(u8, State)>,
     last: Instant,
+    /// el tooltip de `Battery.py status` (perfil, ahorro, tiempo que queda),
+    /// que se lee en otro hilo
+    tip: Arc<Mutex<String>>,
+    tip_last: Option<Instant>,
+}
+
+/// Pedirle el tooltip a Battery.py sin esperarlo.
+fn ask_tooltip(tip: Arc<Mutex<String>>) {
+    std::thread::spawn(move || {
+        let path = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/hypr/scripts/Battery.py");
+        let out = std::process::Command::new(path).arg("status").stderr(std::process::Stdio::null()).output();
+        let text = out
+            .ok()
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+            .and_then(|v| v["tooltip"].as_str().map(String::from))
+            .unwrap_or_default();
+        if let Ok(mut t) = tip.lock() {
+            *t = text;
+        }
+    });
 }
 
 /// (por ciento, estado) juntando las baterías del equipo, o None si no hay.
@@ -66,7 +87,7 @@ fn info() -> Option<(u8, State)> {
 
 impl Battery {
     pub fn new() -> Battery {
-        Battery { now: info(), last: Instant::now() }
+        Battery { now: info(), last: Instant::now(), tip: Arc::default(), tip_last: None }
     }
 }
 
@@ -103,6 +124,13 @@ impl Module for Battery {
         Some(Line::from(vec![Span::styled(label, st), Span::styled(format!(" {pct}%"), Style::new().fg(t.fg))]))
     }
 
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        self.now?;
+        let t = self.tip.lock().ok()?.clone();
+        // el de Battery.py es texto, no marcado
+        (!t.is_empty()).then(|| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"))
+    }
+
     fn act(&mut self, act: Act, _: u16) {
         match act {
             Act::Left => script("Battery.py", &["profile"]),
@@ -114,6 +142,11 @@ impl Module for Battery {
     fn update(&mut self, ev: &Ev) -> bool {
         // Battery.py avisa con RTMIN+11 al cambiar de perfil o de ahorro
         let now_please = matches!(ev, Ev::Signal(11));
+        // su tooltip: cada minuto (como lo pedía waybar) y con la señal
+        if self.now.is_some() && (now_please || self.tip_last.is_none_or(|t| t.elapsed().as_secs() >= 60)) {
+            self.tip_last = Some(Instant::now());
+            ask_tooltip(self.tip.clone());
+        }
         if !now_please && (!matches!(ev, Ev::Tick) || self.last.elapsed().as_secs() < 20) {
             return false;
         }

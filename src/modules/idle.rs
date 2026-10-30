@@ -4,7 +4,7 @@
 //! (main.rs), con el protocolo idle-inhibit sobre su superficie; este módulo
 //! solo dice si se quiere.
 
-use super::{Act, Ev, Module, show, template};
+use super::{Act, Ev, Module, l, show, template};
 use crate::fmt::{Conf, Val};
 use discada_kit::look::Look;
 use ratatui::style::Style;
@@ -38,6 +38,14 @@ impl Module for Idle {
         };
         let vals: [(&str, Val); 0] = [];
         show(look, &tpl, &vals, Style::new().fg(if on { t.fg } else { t.muted }))
+    }
+
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        if self.on.get() {
+            self.conf.tooltip("activated", l("Despierta: sí\nLa pantalla no se apaga ni se bloquea", "Stay awake: on\nScreen won't dim, lock or sleep"))
+        } else {
+            self.conf.tooltip("deactivated", l("Despierta: no\nClic para que la pantalla no se apague", "Stay awake: off\nClick to keep the screen on"))
+        }
     }
 
     fn act(&mut self, act: Act, _: u16) {

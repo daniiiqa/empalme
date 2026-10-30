@@ -15,6 +15,8 @@ use std::path::PathBuf;
 #[derive(Clone, PartialEq, Default)]
 struct Now {
     text: String,
+    /// el de AppStrip.py (ya con marcado)
+    tooltip: String,
     active: bool,
     closed: bool,
 }
@@ -31,7 +33,12 @@ fn read(slot: &str) -> Now {
         return Now::default();
     };
     let has = |c: &str| v["class"].as_array().is_some_and(|a| a.iter().any(|x| x.as_str() == Some(c)));
-    Now { text: v["text"].as_str().unwrap_or("").to_string(), active: has("active"), closed: has("closed") }
+    Now {
+        text: v["text"].as_str().unwrap_or("").to_string(),
+        tooltip: v["tooltip"].as_str().unwrap_or("").to_string(),
+        active: has("active"),
+        closed: has("closed"),
+    }
 }
 
 impl App {
@@ -56,6 +63,10 @@ impl Module for App {
         }
         let text = self.now.text.replace('&', "&amp;").replace('<', "&lt;");
         show(look, &text, &[], Style::new().fg(fg))
+    }
+
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        (self.conf.0["tooltip"].as_bool() != Some(false)).then(|| self.now.tooltip.clone())
     }
 
     fn underline(&self, look: &Look) -> Option<Color> {

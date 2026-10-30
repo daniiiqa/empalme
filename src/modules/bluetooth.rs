@@ -1,10 +1,12 @@
 //! El bluetooth, con los formatos del look como el de waybar: `format-on`,
 //! `format-off`, `format-disabled` (bloqueado con rfkill), `format-connected`
 //! y `format-no-controller` (sin él, el módulo no se ve); `{num_connections}`,
-//! `{device_alias}` (el primero conectado). Se entera por las señales de bluez,
+//! `{device_alias}` (el primero conectado). El tooltip, igual que en waybar
+//! (`{device_enumerate}`: un renglón por cada uno conectado, con
+//! `tooltip-format-enumerate-connected`). Se entera por las señales de bluez,
 //! sin preguntar a cada rato. Clic: vato en bluetooth.
 
-use super::{Act, Ev, Module, script, show, template};
+use super::{Act, Ev, Module, l, script, show, template};
 use crate::fmt::{Conf, Val};
 use discada_kit::look::Look;
 use ratatui::style::Style;
@@ -21,8 +23,8 @@ type Objects = HashMap<OwnedObjectPath, HashMap<String, Props>>;
 pub struct State {
     /// no-controller, disabled, off, on, connected
     pub state: &'static str,
-    /// los nombres de lo conectado
-    pub devices: Vec<String>,
+    /// lo conectado: (nombre, por ciento de su batería si lo dice)
+    pub devices: Vec<(String, Option<u8>)>,
 }
 
 fn get<'a, T: TryFrom<&'a Value<'a>>>(p: &'a Props, k: &str) -> Option<T> {
@@ -52,7 +54,9 @@ fn read(c: &Connection) -> State {
             }
         if let Some(d) = ifaces.get("org.bluez.Device1")
             && get(d, "Connected").unwrap_or(false) {
-                devices.push(get::<&str>(d, "Alias").or(get::<&str>(d, "Name")).unwrap_or("?").to_string());
+                let name = get::<&str>(d, "Alias").or(get::<&str>(d, "Name")).unwrap_or("?").to_string();
+                let battery = ifaces.get("org.bluez.Battery1").and_then(|b| get::<u8>(b, "Percentage"));
+                devices.push((name, battery));
             }
     }
     if state == "on" && !devices.is_empty() {
@@ -124,10 +128,44 @@ impl Module for Bluetooth {
         };
         let vals = [
             ("num_connections", Val::Num(self.now.devices.len() as f64)),
-            ("device_alias", Val::from(self.now.devices.first().map(String::as_str).unwrap_or(""))),
+            ("device_alias", Val::from(self.now.devices.first().map(|d| d.0.as_str()).unwrap_or(""))),
         ];
         let off = matches!(self.now.state, "off" | "disabled");
         show(look, &tpl, &vals, Style::new().fg(if off { t.muted } else { t.fg }))
+    }
+
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        let c = &self.conf;
+        let tpl = match self.now.state {
+            "connected" => c.tooltip("connected", "{device_enumerate}"),
+            "on" => c.tooltip("on", l("Bluetooth prendido", "Bluetooth on")),
+            "off" => c.tooltip("off", l("Bluetooth apagado", "Bluetooth off")),
+            "disabled" => c.tooltip("disabled", l("Bluetooth bloqueado", "Bluetooth blocked")),
+            _ => return None,
+        }?;
+        // un renglón por cada uno conectado (con su batería si la dice)
+        let each: Vec<String> = self
+            .now
+            .devices
+            .iter()
+            .map(|(name, bat)| {
+                let f = match bat {
+                    Some(_) => c
+                        .str("tooltip-format-enumerate-connected-battery")
+                        .or_else(|| c.str("tooltip-format-enumerate-connected"))
+                        .unwrap_or_else(|| "{device_alias} {device_battery_percentage}%".into()),
+                    None => c.str("tooltip-format-enumerate-connected").map(|f| f.replace("{device_battery_percentage}", "?")).unwrap_or_else(|| "{device_alias}".into()),
+                };
+                let vals = [("device_alias", Val::from(name.as_str())), ("device_battery_percentage", Val::Num(bat.unwrap_or(0) as f64))];
+                crate::fmt::fill(&f, &vals)
+            })
+            .collect();
+        let vals = [
+            ("num_connections", Val::Num(self.now.devices.len() as f64)),
+            ("device_alias", Val::from(self.now.devices.first().map(|d| d.0.as_str()).unwrap_or(""))),
+        ];
+        // {device_enumerate} ya va relleno (y escapado): se pone al final
+        Some(crate::fmt::fill(&tpl, &vals).replace("{device_enumerate}", &each.join("\n")))
     }
 
     fn act(&mut self, act: Act, _: u16) {

@@ -4,7 +4,7 @@
 //! `Changed` de arre, sin otro proceso. Clic: vato en notificaciones; clic
 //! derecho: no molestar.
 
-use super::{Act, Ev, Module, script, show, spawn, template};
+use super::{Act, Ev, Module, l, script, show, spawn, template};
 use crate::fmt::{Conf, Val};
 use discada_kit::look::Look;
 use ratatui::style::Style;
@@ -106,6 +106,19 @@ impl Module for Notifications {
         let tpl = tpl.replace("{icon}", &icon);
         let vals = [("", Val::Num(count as f64))];
         show(look, &tpl, &vals, Style::new().fg(if dnd { t.muted } else { t.fg }))
+    }
+
+    /// Lo mismo que dice `arre waybar`.
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        let (count, dnd) = self.now?;
+        let first = match (count, dnd) {
+            (0, false) => l("Sin notificaciones", "No notifications").to_string(),
+            (1, false) => format!("1 {}", l("notificación", "notification")),
+            (n, false) => format!("{n} {}", l("notificaciones", "notifications")),
+            (n, true) => format!("{n} · {}", l("no molestar", "do not disturb")),
+        };
+        let text = format!("{first}\n{}", l("Clic derecho: no molestar", "Right click: do not disturb"));
+        self.conf.tooltip("", "").map(|t| if t.is_empty() { text } else { t })
     }
 
     fn act(&mut self, act: Act, _: u16) {

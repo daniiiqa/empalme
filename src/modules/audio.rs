@@ -29,6 +29,8 @@ struct Now {
     bluetooth: bool,
     /// el tipo de la salida como en format-icons de waybar (headphone…)
     port: String,
+    /// el nombre del dispositivo (el tooltip)
+    desc: String,
 }
 
 pub struct Audio {
@@ -72,6 +74,7 @@ fn read(kind: Kind) -> Option<Now> {
         muted: dev["mute"].as_bool().unwrap_or(false),
         bluetooth: name.starts_with("bluez"),
         port: port.into(),
+        desc: dev["description"].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -102,6 +105,30 @@ impl Audio {
     }
 }
 
+impl Audio {
+    /// Los valores de los formatos: con los nombres de waybar para la
+    /// salida ({volume}, {desc}) y para el micrófono ({source_volume}…).
+    fn vals(&self) -> Vec<(&str, Val)> {
+        let Some(n) = &self.now else { return Vec::new() };
+        let c = &self.conf;
+        let mut icons = if n.port.is_empty() { Vec::new() } else { c.icons(&n.port) };
+        if icons.is_empty() {
+            icons = c.icons("default");
+        }
+        if icons.is_empty() && self.kind == Kind::Sink {
+            icons = ["󰕿", "󰖀", "󰕾"].map(String::from).to_vec();
+        }
+        let v = n.vol as f64;
+        vec![
+            ("volume", Val::Num(v)),
+            ("source_volume", Val::Num(v)),
+            ("icon", Val::Text(pick(&icons, v))),
+            ("desc", Val::from(n.desc.as_str())),
+            ("source_desc", Val::from(n.desc.as_str())),
+        ]
+    }
+}
+
 impl Module for Audio {
     fn line(&self, look: &Look) -> Option<Line<'static>> {
         let n = self.now.as_ref()?;
@@ -115,15 +142,16 @@ impl Module for Audio {
             (Kind::Source, "muted") => template(look, c, "muted", "<span color=\"muted\">󰍭</span>", "mic --"),
             (Kind::Source, _) => template(look, c, "", "<span color=\"primary\">󰍬</span> {volume}%", "mic {volume}%"),
         };
-        let mut icons = if n.port.is_empty() { Vec::new() } else { c.icons(&n.port) };
-        if icons.is_empty() {
-            icons = c.icons("default");
-        }
-        if icons.is_empty() && self.kind == Kind::Sink {
-            icons = ["󰕿", "󰖀", "󰕾"].map(String::from).to_vec();
-        }
-        let vals = [("volume", Val::Num(n.vol as f64)), ("icon", Val::Text(pick(&icons, n.vol as f64)))];
-        show(look, &tpl, &vals, Style::new().fg(if n.muted { t.muted } else { t.fg }))
+        show(look, &tpl, &self.vals(), Style::new().fg(if n.muted { t.muted } else { t.fg }))
+    }
+
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        self.now.as_ref()?;
+        let tpl = match self.kind {
+            Kind::Sink => self.conf.tooltip("", "{desc} | {volume}%"),
+            Kind::Source => self.conf.tooltip("", "{source_desc} | {source_volume}%"),
+        }?;
+        Some(crate::fmt::fill(&tpl, &self.vals()))
     }
 
     fn act(&mut self, act: Act, _: u16) {

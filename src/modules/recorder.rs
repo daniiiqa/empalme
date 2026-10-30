@@ -5,7 +5,7 @@
 //! Como en el CSS de los looks: rojo y pulsando mientras graba, más tenue en
 //! pausa. Clic: detener (o guardar el replay); medio: pausa; derecho: el menú.
 
-use super::{Act, Ev, Module, script, show};
+use super::{Act, Ev, Module, l, script, show};
 use crate::fmt::{Conf, mix, named};
 use discada_kit::look::Look;
 use ratatui::style::Style;
@@ -54,6 +54,15 @@ fn read() -> Now {
     out
 }
 
+/// REPLAY_SECONDS de hypr/recorder.conf (60 si no dice).
+fn replay_seconds() -> u32 {
+    let f = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/hypr/recorder.conf");
+    std::fs::read_to_string(f)
+        .ok()
+        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("REPLAY_SECONDS=")?.trim_matches('"').parse().ok()))
+        .unwrap_or(60)
+}
+
 impl Recorder {
     pub fn new(conf: Conf) -> Recorder {
         Recorder { conf, now: read() }
@@ -87,6 +96,25 @@ impl Module for Recorder {
             parts.push(self.label(look, "replay", "\u{f0459}", "[rpl]"));
         }
         show(look, &parts.join("  "), &[], Style::new().fg(t.fg))
+    }
+
+    /// Lo mismo que dice `Recorder.sh status`.
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        let n = &self.now;
+        let mut tip = Vec::new();
+        if n.rec.is_some() {
+            tip.push(if n.paused { l("Grabación en pausa", "Recording paused") } else { l("Grabando", "Recording") }.to_string());
+            tip.push(l("click: detener · medio: pausa · derecho: menú", "click: stop · middle: pause · right: menu").to_string());
+        }
+        if n.replay {
+            if tip.is_empty() {
+                tip.push(format!("{} {}s", l("Replay: últimos", "Replay: last"), replay_seconds()));
+                tip.push(l("click: guardar · derecho: menú", "click: save · right: menu").to_string());
+            } else {
+                tip.push(l("Replay encendido", "Replay on").to_string());
+            }
+        }
+        (!tip.is_empty() && self.conf.0["tooltip"].as_bool() != Some(false)).then(|| tip.join("\n"))
     }
 
     fn act(&mut self, act: Act, _: u16) {

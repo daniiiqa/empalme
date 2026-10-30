@@ -62,6 +62,11 @@ pub trait Module {
     fn part(&self, _col: u16) -> Option<Part> {
         None
     }
+    /// El tooltip: marcado como el de los formatos, un renglón por `\n`.
+    /// None: sin tooltip.
+    fn tooltip(&self, _look: &Look) -> Option<String> {
+        None
+    }
     /// Una línea abajo del módulo, de este color (la app enfocada).
     fn underline(&self, _look: &Look) -> Option<ratatui::style::Color> {
         None
@@ -144,4 +149,14 @@ pub fn spawn(cmd: &mut Command) {
             let _ = child.wait();
         });
     }
+}
+
+/// Idioma de discada (hypr/discada.conf → LANGUAGE=es|en): el texto que toca.
+pub fn l(es: &'static str, en: &'static str) -> &'static str {
+    let f = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/hypr/discada.conf");
+    let spanish = std::fs::read_to_string(f)
+        .ok()
+        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("LANGUAGE=").map(|v| v.trim_start().starts_with("es"))))
+        .unwrap_or(false);
+    if spanish { es } else { en }
 }

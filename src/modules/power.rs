@@ -1,7 +1,7 @@
 //! El botón de apagar. Clic: el menú de salir (Wlogout.sh); clic derecho:
 //! cambiar el blur (ChangeBlur.sh).
 
-use super::{Act, Ev, Module, script, show, template};
+use super::{Act, Ev, Module, l, script, show, template};
 use crate::fmt::Conf;
 use discada_kit::look::Look;
 use ratatui::style::Style;
@@ -21,6 +21,10 @@ impl Module for Power {
     fn line(&self, look: &Look) -> Option<Line<'static>> {
         let tpl = template(look, &self.conf, "", "<span color=\"red\">󰐥</span>", "[x]");
         show(look, &tpl, &[], Style::new().fg(look.theme.fg))
+    }
+
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        self.conf.tooltip("", l("Clic: salir\nClic derecho: cambiar el blur", "Click: logout menu\nRight click: change blur"))
     }
 
     fn act(&mut self, act: Act, _: u16) {

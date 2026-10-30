@@ -86,6 +86,16 @@ impl Conf {
         own.or_else(|| self.str("format"))
     }
 
+    /// `tooltip-format-<estado>`, o `tooltip-format`, o `default`; None si el
+    /// look dice `tooltip = false`.
+    pub fn tooltip(&self, state: &str, default: &str) -> Option<String> {
+        if self.0["tooltip"].as_bool() == Some(false) {
+            return None;
+        }
+        let own = if state.is_empty() { None } else { self.str(&format!("tooltip-format-{state}")) };
+        Some(own.or_else(|| self.str("tooltip-format")).unwrap_or_else(|| default.to_string()))
+    }
+
     pub fn num(&self, key: &str) -> Option<f64> {
         self.0[key].as_f64()
     }

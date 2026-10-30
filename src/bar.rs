@@ -42,6 +42,8 @@ pub struct Bar {
     /// `[bar.hover-workspaces]`: los del botón de workspace bajo el mouse
     /// (fg, bg, y active-fg, active-bg si es el activo)
     pub hover_ws: Value,
+    /// `[bar.tooltip]`: fg, bg, border (colores), radius
+    pub tooltip: Value,
 }
 
 impl Default for Bar {
@@ -64,6 +66,7 @@ impl Default for Bar {
             groups: Value::Null,
             hover: Value::Null,
             hover_ws: Value::Null,
+            tooltip: Value::Null,
         }
     }
 }
@@ -115,5 +118,6 @@ pub fn load() -> Bar {
     b.groups = v["groups"].clone();
     b.hover = v["hover"].clone();
     b.hover_ws = v["hover-workspaces"].clone();
+    b.tooltip = v["tooltip"].clone();
     b
 }

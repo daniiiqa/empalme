@@ -13,6 +13,7 @@ mod fmt;
 mod hypr;
 mod modules;
 mod signals;
+mod tooltip;
 
 use bar::{Bar, Style};
 use drawer::Drawer;
@@ -121,6 +122,7 @@ struct App {
     /// el mouse sobre la barra (x en pixeles), y qué tiene debajo
     hover_x: Option<f32>,
     hovered: Option<(usize, Option<u16>)>,
+    tip: tooltip::Tip,
     /// el último cuadro de los cajones (para saber cuánto avanzar)
     last_frame: Option<Instant>,
     /// ya se pidió al compositor que avise del siguiente cuadro
@@ -368,6 +370,10 @@ impl App {
             dst[2] = src[0];
             dst[3] = src[3];
         }
+        // lo que dice el tooltip puede haber cambiado (el cpu, la hora…)
+        if self.tip.layer.is_some() {
+            self.tip_show();
+        }
         let surface = layer.wl_surface();
         surface.set_buffer_scale(s);
         surface.damage_buffer(0, 0, w, h);
@@ -389,6 +395,7 @@ impl App {
         let i = sl.module;
         self.modules[i].1.act(act, rel);
         self.sync_idle();
+        self.tip_reset(false);
         // lo que cambia solo con el clic (el reloj largo): de una vez
         self.draw();
     }
@@ -400,6 +407,7 @@ impl App {
         let now = self.under_mouse().map(|(sl, part)| (self.slots[sl].module, part.map(|p| p.0)));
         if now != self.hovered {
             self.hovered = now;
+            self.tip_reset(true);
             if !self.drawers_moving() {
                 self.redraw();
             }
@@ -506,6 +514,7 @@ impl App {
                     }
                     self.layer = None;
                     self.pool = None;
+                    self.tip_hide();
                 } else {
                     self.create_layer();
                 }
@@ -620,6 +629,7 @@ fn run() -> Result<(), String> {
         names: built.names,
         hover_x: None,
         hovered: None,
+        tip: tooltip::Tip::default(),
         last_frame: None,
         frame_pending: false,
         last_pulse: Instant::now(),
@@ -642,11 +652,17 @@ fn run() -> Result<(), String> {
         // despertar justo al cambiar el segundo, para que el reloj no se salte uno
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
         let mut wait = Duration::from_millis(1000 - now.subsec_millis() as u64 + 2);
+        if let Some(d) = app.tip_due() {
+            wait = wait.min(d);
+        }
         const PULSE: Duration = Duration::from_millis(33);
         if app.pulsing() {
             wait = wait.min(PULSE.saturating_sub(app.last_pulse.elapsed()));
         }
         event_loop.dispatch(wait, &mut app).map_err(|e| e.to_string())?;
+        if app.tip_due() == Some(Duration::ZERO) {
+            app.tip_show();
+        }
         // el pulso del grabador (si los cajones se mueven, ya se redibuja con ellos)
         if app.pulsing() && app.last_pulse.elapsed() >= PULSE {
             app.last_pulse = Instant::now();
@@ -705,12 +721,20 @@ impl OutputHandler for App {
 }
 
 impl LayerShellHandler for App {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        if self.tip.layer.as_ref() == Some(layer) {
+            self.tip_hide();
+            return;
+        }
         self.layer = None;
         self.configured = false;
     }
 
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, cfg: LayerSurfaceConfigure, _: u32) {
+        if self.tip.layer.as_ref() == Some(layer) {
+            self.tip_configure(cfg.new_size);
+            return;
+        }
         if self.layer.as_ref() != Some(layer) {
             return;
         }

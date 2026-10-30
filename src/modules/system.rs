@@ -4,7 +4,7 @@
 //! `format-critical` pasando `critical-threshold`). Clic derecho: vato en
 //! sistema. Cada uno se relee a su ritmo (`interval`, en segundos).
 
-use super::{Act, Ev, Module, script, show, template};
+use super::{Act, Ev, Module, l, script, show, template};
 use crate::fmt::{Conf, Val, named, pick};
 use discada_kit::look::Look;
 use ratatui::style::Style;
@@ -136,6 +136,8 @@ impl System {
                 self.prev = now;
                 let all = usage.first().copied().unwrap_or(0.0);
                 self.vals.push(("usage", all.round()));
+                let load = read("/proc/loadavg").split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+                self.vals.push(("load", load));
                 self.texts.push(("icon".into(), pick(&icons, all)));
                 for (i, u) in usage.iter().skip(1).take(64).enumerate() {
                     self.texts.push((format!("icon{i}"), pick(&icons, *u)));
@@ -187,6 +189,14 @@ impl System {
     }
 }
 
+impl System {
+    fn vals(&self) -> Vec<(&str, Val)> {
+        let mut vals: Vec<(&str, Val)> = self.vals.iter().map(|(k, v)| (*k, Val::Num(*v))).collect();
+        vals.extend(self.texts.iter().map(|(k, v)| (k.as_str(), Val::Text(v.clone()))));
+        vals
+    }
+}
+
 impl Module for System {
     fn line(&self, look: &Look) -> Option<Line<'static>> {
         if self.kind == Kind::Temperature && self.sensor.is_none() {
@@ -205,10 +215,22 @@ impl Module for System {
                 Kind::Temperature => template(look, c, "", "<span color=\"primary\">󰔏</span> {temperatureC}°", "tmp {temperatureC}c"),
             }
         };
-        let mut vals: Vec<(&str, Val)> = self.vals.iter().map(|(k, v)| (*k, Val::Num(*v))).collect();
-        vals.extend(self.texts.iter().map(|(k, v)| (k.as_str(), Val::Text(v.clone()))));
         let critical = named("critical").unwrap_or(t.red);
-        show(look, &tpl, &vals, Style::new().fg(if self.critical { critical } else { t.fg }))
+        show(look, &tpl, &self.vals(), Style::new().fg(if self.critical { critical } else { t.fg }))
+    }
+
+    fn tooltip(&self, _: &Look) -> Option<String> {
+        if self.kind == Kind::Temperature && self.sensor.is_none() {
+            return None;
+        }
+        let tpl = match self.kind {
+            Kind::Cpu => self.conf.tooltip("", l("Uso: {usage}%\nCarga: {load:0.2f}", "Usage: {usage}%\nLoad: {load:0.2f}")),
+            Kind::Memory => self.conf.tooltip("", "{used:0.1f}GB/{total:0.1f}G"),
+            Kind::Disk => self.conf.tooltip("", l("{used} de {total} en {path} ({percentage_used}%)", "{used} used out of {total} on {path} ({percentage_used}%)")),
+            Kind::Temperature if self.critical => self.conf.tooltip("critical", "{temperatureC}°C"),
+            Kind::Temperature => self.conf.tooltip("", "{temperatureC}°C"),
+        }?;
+        Some(crate::fmt::fill(&tpl, &self.vals()))
     }
 
     fn act(&mut self, act: Act, _: u16) {
