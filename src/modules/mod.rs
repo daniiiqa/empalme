@@ -10,6 +10,7 @@ pub mod idle;
 pub mod network;
 pub mod notifications;
 pub mod power;
+pub mod recorder;
 pub mod system;
 pub mod workspaces;
 
@@ -34,6 +35,12 @@ pub enum Ev {
     Audio,
     Bluetooth(bluetooth::State),
     Notifications(notifications::State),
+    /// `pkill -RTMIN+N -x empalme`: N
+    Signal(i32),
+    /// SIGUSR1: esconder o mostrar (la barra, no los módulos)
+    Toggle,
+    /// SIGUSR2: releer el look (la barra)
+    Reload,
     /// una vez por segundo, justo al cambiar el segundo
     Tick,
 }
@@ -70,6 +77,7 @@ pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
         "network" => Box::new(network::Network::new(conf)),
         "bluetooth" => Box::new(bluetooth::Bluetooth::new(conf)),
         "power" => Box::new(power::Power::new(conf)),
+        "recorder" => Box::new(recorder::Recorder::new(conf)),
         "notifications" => Box::new(notifications::Notifications::new(conf)),
         "idle" | "idle_inhibitor" => Box::new(idle::Idle::new(conf, ctx.idle.clone())),
         _ => return None,

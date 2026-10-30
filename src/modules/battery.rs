@@ -112,7 +112,9 @@ impl Module for Battery {
     }
 
     fn update(&mut self, ev: &Ev) -> bool {
-        if !matches!(ev, Ev::Tick) || self.last.elapsed().as_secs() < 20 {
+        // Battery.py avisa con RTMIN+11 al cambiar de perfil o de ahorro
+        let now_please = matches!(ev, Ev::Signal(11));
+        if !now_please && (!matches!(ev, Ev::Tick) || self.last.elapsed().as_secs() < 20) {
             return false;
         }
         self.last = Instant::now();

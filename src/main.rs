@@ -11,6 +11,7 @@ mod bar;
 mod fmt;
 mod hypr;
 mod modules;
+mod signals;
 
 use bar::{Bar, Style};
 use discada_kit::look::Look;
@@ -81,6 +82,8 @@ struct App {
     slots: Vec<Slot>,
     /// el módulo idle dice si se quiere; la barra lo pide al compositor
     idle: Rc<Cell<bool>>,
+    /// escondida con SIGUSR1
+    hidden: bool,
     idle_mgr: Option<ZwpIdleInhibitManagerV1>,
     inhibitor: Option<ZwpIdleInhibitorV1>,
     qh: QueueHandle<App>,
@@ -233,6 +236,27 @@ impl App {
     }
 
     fn on_ev(&mut self, ev: Ev) {
+        match ev {
+            Ev::Toggle => {
+                self.hidden = !self.hidden;
+                if self.hidden {
+                    if let Some(i) = self.inhibitor.take() {
+                        i.destroy();
+                    }
+                    self.layer = None;
+                    self.pool = None;
+                } else {
+                    self.create_layer();
+                }
+                return;
+            }
+            Ev::Reload => {
+                self.look.refresh();
+                self.reload(true);
+                return;
+            }
+            _ => {}
+        }
         let mut dirty = false;
         for (_, m) in &mut self.modules {
             dirty |= m.update(&ev);
@@ -248,6 +272,9 @@ impl App {
             self.bar = bar::load();
             self.painter = Painter::sized(self.bar.font_size);
             self.modules = build(&self.bar, &Ctx { idle: self.idle.clone() });
+            if self.hidden {
+                return;
+            }
             self.layer = None;
             self.pool = None;
             self.create_layer();
@@ -271,6 +298,8 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    // antes de abrir cualquier hilo, para que todos las tengan bloqueadas
+    signals::block();
     let conn = Connection::connect_to_env().map_err(|e| format!("Wayland: {e}"))?;
     let (globals, queue) = registry_queue_init(&conn).map_err(|e| format!("Wayland: {e}"))?;
     let qh = queue.handle();
@@ -288,7 +317,8 @@ fn run() -> Result<(), String> {
     hypr::events(tx.clone());
     modules::audio::watch(tx.clone());
     modules::bluetooth::watch(tx.clone());
-    modules::notifications::watch(tx);
+    modules::notifications::watch(tx.clone());
+    signals::watch(tx);
     // los nombres de días y meses del reloj, en el idioma del sistema
     unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
 
@@ -316,6 +346,7 @@ fn run() -> Result<(), String> {
         bar,
         slots: Vec::new(),
         idle,
+        hidden: false,
         idle_mgr: globals.bind::<ZwpIdleInhibitManagerV1, _, _>(&qh, 1..=1, ()).ok(),
         inhibitor: None,
         qh,
