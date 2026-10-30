@@ -1,6 +1,8 @@
 //! Cómo se ve la barra y cada módulo, como el CSS de waybar de cada look:
 //!   [bar.box]   la barra entera (window#waybar): bg, border, border-width,
-//!               border-sides (all | bottom | top), dashed, radius
+//!               border-sides (all | bottom | top), dashed, radius,
+//!               top-gradient [colores] y top-width (el border-image de
+//!               ofrenda: una tira de colores arriba, de lado a lado)
 //!   [bar.pill]  cada módulo (la regla común de sus #clock, #network…): fg,
 //!               bg, border, border-width, radius, margin [arriba, derecha,
 //!               abajo, izquierda], padding (a los lados), shadow [x, y,
@@ -37,6 +39,9 @@ pub struct BarBox {
     pub sides: String,
     pub dashed: bool,
     pub radius: f32,
+    /// la tira de arriba en degradado (de izquierda a derecha) y su alto
+    pub gradient: Vec<String>,
+    pub gradient_width: f32,
 }
 
 impl BarBox {
@@ -51,26 +56,60 @@ impl BarBox {
             sides: s(v, "border-sides").unwrap_or_else(|| "all".into()),
             dashed: v["dashed"].as_bool().unwrap_or(false),
             radius: f(v, "radius").unwrap_or(radius),
+            gradient: v["top-gradient"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
+            gradient_width: f(v, "top-width").unwrap_or(3.0),
         }
     }
 
     /// La barra: su fondo y su borde, en el cuadro entero (pixeles del monitor).
     pub fn paint(&self, pix: &mut Pixmap, look: &Look, sf: f32, alpha: f32) {
-        let (w, h) = (pix.width() as f32, pix.height() as f32);
+        let (w, mut h) = (pix.width() as f32, pix.height() as f32);
         let r = self.radius * sf;
+        // con la tira de arriba, la caja empieza debajo de ella
+        let top = if self.gradient.len() >= 2 { (self.gradient_width * sf).round() } else { 0.0 };
+        h -= top;
         if let Some((c, a)) = self.bg.as_deref().and_then(|v| resolve(look, v)) {
-            rounded(pix, 0.0, 0.0, w, h, r, c, a * alpha);
+            rounded(pix, 0.0, top, w, h, r, c, a * alpha);
+        }
+        if top > 0.0 {
+            self.strip(pix, look, w, top, alpha);
         }
         let Some((c, a)) = self.border.as_deref().and_then(|v| resolve(look, v)) else { return };
         let bw = (self.width * sf).max(1.0);
         let dash = self.dashed.then_some(3.0 * sf);
         match self.sides.as_str() {
             "bottom" | "top" => {
-                let y = if self.sides == "bottom" { h - bw } else { 0.0 };
+                let y = if self.sides == "bottom" { top + h - bw } else { top };
                 line(pix, y, w, bw, c, a, dash);
             }
-            _ => stroke_rounded(pix, 0.0, 0.0, w, h, r, bw, c, a, dash),
+            _ => stroke_rounded(pix, 0.0, top, w, h, r, bw, c, a, dash),
         }
+    }
+
+    /// La tira de colores de arriba, repartidos parejo de izquierda a derecha.
+    fn strip(&self, pix: &mut Pixmap, look: &Look, w: f32, h: f32, alpha: f32) {
+        let n = self.gradient.len();
+        let stops: Vec<tiny_skia::GradientStop> = self
+            .gradient
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                let (c, a) = resolve(look, v)?;
+                let Color::Rgb(r, g, b) = c else { return None };
+                let col = tiny_skia::Color::from_rgba8(r, g, b, (a * alpha * 255.0).round() as u8);
+                Some(tiny_skia::GradientStop::new(i as f32 / (n - 1) as f32, col))
+            })
+            .collect();
+        let shader = tiny_skia::LinearGradient::new(
+            tiny_skia::Point::from_xy(0.0, 0.0),
+            tiny_skia::Point::from_xy(w, 0.0),
+            stops,
+            tiny_skia::SpreadMode::Pad,
+            tiny_skia::Transform::identity(),
+        );
+        let (Some(shader), Some(rect)) = (shader, tiny_skia::Rect::from_xywh(0.0, 0.0, w, h)) else { return };
+        let paint = tiny_skia::Paint { shader, anti_alias: false, ..Default::default() };
+        pix.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
     }
 }
 
