@@ -125,7 +125,7 @@ pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
         "app" => Box::new(app::App::new(tag, conf)),
         "workspaces" => Box::new(workspaces::Workspaces::new(conf)),
         "clock" => Box::new(clock::Clock::new(conf)),
-        "battery" => Box::new(battery::Battery::new()),
+        "battery" => Box::new(battery::Battery::new(conf)),
         "audio" => Box::new(audio::Audio::new(audio::Kind::Sink, conf)),
         "mic" => Box::new(audio::Audio::new(audio::Kind::Source, conf)),
         "cpu" => Box::new(system::System::new(system::Kind::Cpu, conf)),

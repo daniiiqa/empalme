@@ -1,11 +1,15 @@
 //! La batería (solo en laptops: sin batería del equipo no aparece). La misma
 //! cuenta que Battery.py: todas las baterías juntas, las de mouse y audífonos
 //! no. Clic: el siguiente perfil de energía; clic derecho: el ahorro.
+//! Con el `format` y los `format-icons` del look (por estado: discharging,
+//! charging, full y saver, como el `alt` de Battery.py), y los colores de sus
+//! clases `.low` y `.critical` (`low-color`, `critical-color`).
 
-use super::{Act, Ev, Module, script};
+use super::{Act, Ev, Module, script, show};
+use crate::fmt::{Conf, Val, color, mix, named, pick};
 use discada_kit::look::Look;
 use ratatui::style::{Style, Stylize};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -28,26 +32,26 @@ enum State {
 }
 
 pub struct Battery {
+    conf: Conf,
     now: Option<(u8, State)>,
     last: Instant,
     /// el tooltip de `Battery.py status` (perfil, ahorro, tiempo que queda),
     /// que se lee en otro hilo
-    tip: Arc<Mutex<String>>,
+    tip: Arc<Mutex<(String, bool)>>,
     tip_last: Option<Instant>,
 }
 
 /// Pedirle el tooltip a Battery.py sin esperarlo.
-fn ask_tooltip(tip: Arc<Mutex<String>>) {
+/// También dice si está el ahorro (la clase `saver`).
+fn ask_tooltip(tip: Arc<Mutex<(String, bool)>>) {
     std::thread::spawn(move || {
         let path = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/hypr/scripts/Battery.py");
         let out = crate::signals::clean(&mut std::process::Command::new(path)).arg("status").stderr(std::process::Stdio::null()).output();
-        let text = out
-            .ok()
-            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-            .and_then(|v| v["tooltip"].as_str().map(String::from))
-            .unwrap_or_default();
+        let v = out.ok().and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok()).unwrap_or_default();
+        let text = v["tooltip"].as_str().unwrap_or_default().to_string();
+        let saver = v["class"].as_array().is_some_and(|c| c.iter().any(|x| x == "saver"));
         if let Ok(mut t) = tip.lock() {
-            *t = text;
+            *t = (text, saver);
         }
     });
 }
@@ -86,8 +90,8 @@ fn info() -> Option<(u8, State)> {
 }
 
 impl Battery {
-    pub fn new() -> Battery {
-        Battery { now: info(), last: Instant::now(), tip: Arc::default(), tip_last: None }
+    pub fn new(conf: Conf) -> Battery {
+        Battery { conf, now: info(), last: Instant::now(), tip: Arc::default(), tip_last: None }
     }
 }
 
@@ -95,38 +99,61 @@ impl Module for Battery {
     fn line(&self, look: &Look) -> Option<Line<'static>> {
         let (pct, state) = self.now?;
         let t = look.theme;
-        let color = match state {
-            State::Discharging if pct <= 20 => crate::fmt::named("critical").unwrap_or(t.red),
-            State::Charging => t.green,
-            _ => t.fg,
+        let saver = self.tip.lock().is_ok_and(|x| x.1);
+        let alt = match state {
+            State::Charging => "charging",
+            _ if saver => "saver",
+            State::Full => "full",
+            State::Discharging => "discharging",
         };
-        let label = if look.icons {
-            // md-battery_10 … md-battery, y los de cargando
-            let dis = ['\u{f007a}', '\u{f007b}', '\u{f007c}', '\u{f007d}', '\u{f007e}', '\u{f007f}', '\u{f0080}', '\u{f0081}', '\u{f0082}', '\u{f0079}'];
-            let chg = ['\u{f089c}', '\u{f0086}', '\u{f0087}', '\u{f0088}', '\u{f089d}', '\u{f0089}', '\u{f089e}', '\u{f008a}', '\u{f008b}', '\u{f0085}'];
-            let i = ((pct as usize).saturating_sub(1) / 10).min(9);
-            match state {
-                State::Charging => chg[i].to_string(),
-                State::Full => "\u{f06a5}".to_string(),
-                State::Discharging => dis[i].to_string(),
-            }
+        let mut icons = self.conf.icons(alt);
+        if icons.is_empty() {
+            icons = if !look.icons {
+                vec![look.tx(match state {
+                    State::Charging => "bat+",
+                    State::Full => "ac",
+                    State::Discharging => "bat",
+                })]
+            } else {
+                // md-battery_10 … md-battery, y los de cargando
+                let dis = ['\u{f007a}', '\u{f007b}', '\u{f007c}', '\u{f007d}', '\u{f007e}', '\u{f007f}', '\u{f0080}', '\u{f0081}', '\u{f0082}', '\u{f0079}'];
+                let chg = ['\u{f089c}', '\u{f0086}', '\u{f0087}', '\u{f0088}', '\u{f089d}', '\u{f0089}', '\u{f089e}', '\u{f008a}', '\u{f008b}', '\u{f0085}'];
+                match state {
+                    State::Charging => chg.iter().map(|c| c.to_string()).collect(),
+                    State::Full => vec!["\u{f06a5}".to_string()],
+                    State::Discharging => dis.iter().map(|c| c.to_string()).collect(),
+                }
+            };
+        }
+        let tpl = self.conf.format("").unwrap_or_else(|| "{icon} {percentage}%".into());
+        // el ícono puede traer marcado (las etiquetas chicas de fundidora)
+        let tpl = tpl.replace("{icon}", &pick(&icons, pct as f64));
+        // las clases de Battery.py: low (≤20) y critical (≤10) descargando
+        let low = state == State::Discharging && pct <= 20;
+        let critical = state == State::Discharging && pct <= 10;
+        let class = |key: &str| self.conf.str(key).and_then(|c| color(look, &c));
+        let mut fg = if critical {
+            class("critical-color").or_else(|| named("critical")).unwrap_or(t.red)
+        } else if low {
+            class("low-color").or_else(|| named("critical")).unwrap_or(t.red)
         } else {
-            look.tx(match state {
-                State::Charging => "bat+",
-                State::Full => "ac",
-                State::Discharging => "bat",
-            })
+            t.fg
         };
-        let mut st = Style::new().fg(color);
-        if state == State::Discharging && pct <= 10 {
+        if saver && !low {
+            // la opacidad de .saver (sobre el color propio del módulo, si tiene)
+            let own = class("fg").unwrap_or(fg);
+            fg = color(look, &mix(own, t.bg, 0.8)).unwrap_or(fg);
+        }
+        let mut st = Style::new().fg(fg);
+        if critical {
             st = st.bold();
         }
-        Some(Line::from(vec![Span::styled(label, st), Span::styled(format!(" {pct}%"), Style::new().fg(t.fg))]))
+        show(look, &tpl, &[("percentage", Val::Num(pct as f64))], st)
     }
 
     fn tooltip(&self, _: &Look) -> Option<String> {
         self.now?;
-        let t = self.tip.lock().ok()?.clone();
+        let t = self.tip.lock().ok()?.0.clone();
         // el de Battery.py es texto, no marcado
         (!t.is_empty()).then(|| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"))
     }
