@@ -412,8 +412,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
-name = "discada-kit"
+name = "disco"
 version = "0.1.0"
+source = "git+https://github.com/daniiiqa/disco#9c85bd7e0d2607d31155217cef28123b269a06cb"
 dependencies = [
  "cosmic-text",
  "ratatui",
@@ -439,7 +440,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 name = "empalme"
 version = "0.1.0"
 dependencies = [
- "discada-kit",
+ "disco",
  "libc",
  "ratatui",
  "serde_json",

@@ -5,7 +5,7 @@
 
 use super::{Act, Ev, Module, show};
 use crate::fmt::Conf;
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use serde_json::Value;

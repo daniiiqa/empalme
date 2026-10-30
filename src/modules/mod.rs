@@ -18,7 +18,7 @@ pub mod visualizer;
 pub mod workspaces;
 
 use crate::fmt::{Conf, Val, fill, line};
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use std::process::{Command, Stdio};

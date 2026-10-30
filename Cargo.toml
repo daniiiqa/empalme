@@ -6,7 +6,7 @@ description = "La barra de discada: el look del rice, como rola, vato, arre y ta
 license = "MIT"
 
 [dependencies]
-discada-kit = { path = "../discada-kit", features = ["paint"] }
+disco = { git = "https://github.com/daniiiqa/disco", features = ["paint"] }
 libc = "0.2"
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 ratatui = "0.29"

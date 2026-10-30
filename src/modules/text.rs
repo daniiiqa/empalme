@@ -5,7 +5,7 @@
 
 use super::{Act, Ev, Module, show, spawn};
 use crate::fmt::Conf;
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use std::process::Command;

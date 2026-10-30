@@ -13,8 +13,8 @@
 //! barra del color de fondo del look e `"islands"` una isla por módulo.
 
 use crate::fmt;
-use discada_kit::look::Look;
-use discada_kit::paint::{rounded, stroke_rounded};
+use disco::look::Look;
+use disco::paint::{rounded, stroke_rounded};
 use ratatui::style::Color;
 use serde_json::Value;
 use tiny_skia::Pixmap;

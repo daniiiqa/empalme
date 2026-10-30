@@ -10,7 +10,7 @@
 use super::{Act, Ev, Module, Part, script};
 use crate::fmt::Conf;
 use crate::hypr;
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 

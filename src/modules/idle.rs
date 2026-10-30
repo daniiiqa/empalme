@@ -6,7 +6,7 @@
 
 use super::{Act, Ev, Module, l, show, template};
 use crate::fmt::{Conf, Val};
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use std::cell::Cell;

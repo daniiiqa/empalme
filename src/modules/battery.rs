@@ -7,7 +7,7 @@
 
 use super::{Act, Ev, Module, script, show};
 use crate::fmt::{Conf, Val, color, mix, named, pick};
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use std::path::{Path, PathBuf};

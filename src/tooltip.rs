@@ -7,7 +7,7 @@
 
 use crate::App;
 use crate::fmt;
-use discada_kit::paint::rounded;
+use disco::paint::rounded;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};

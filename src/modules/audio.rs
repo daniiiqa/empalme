@@ -8,7 +8,7 @@
 
 use super::{Act, Ev, Module, script, show, template};
 use crate::fmt::{Conf, Val, pick};
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use serde_json::Value;

@@ -6,7 +6,7 @@
 
 use super::{Act, Ev, Module, l, script, show, spawn, template};
 use crate::fmt::{Conf, Val};
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use smithay_client_toolkit::reexports::calloop::channel::Sender;

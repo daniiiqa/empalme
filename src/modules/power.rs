@@ -3,7 +3,7 @@
 
 use super::{Act, Ev, Module, l, script, show, template};
 use crate::fmt::Conf;
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 

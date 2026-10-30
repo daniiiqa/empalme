@@ -6,7 +6,7 @@
 
 use super::{Act, Ev, Module, script, show};
 use crate::fmt::{Conf, color, mix};
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use serde_json::Value;

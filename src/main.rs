@@ -18,8 +18,8 @@ mod tooltip;
 
 use bar::{Bar, Style};
 use drawer::Drawer;
-use discada_kit::look::Look;
-use discada_kit::paint::{Painter, rounded};
+use disco::look::Look;
+use disco::paint::{Painter, rounded};
 use modules::{Act, Ctx, Ev, Module, Part};
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;

@@ -10,7 +10,7 @@
 
 use super::{Act, Ev, Module, l, script, show, spawn};
 use crate::fmt::{Conf, color, mix};
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use smithay_client_toolkit::reexports::calloop::channel::Sender;

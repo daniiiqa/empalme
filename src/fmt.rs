@@ -7,7 +7,7 @@
 //! como rec o critical). Y los tamaños de pango (`size="small"`, `font='12'`,
 //! `<small>`, `<sup>`): ver `Size`.
 
-use discada_kit::look::Look;
+use disco::look::Look;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
