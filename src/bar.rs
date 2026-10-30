@@ -36,6 +36,12 @@ pub struct Bar {
     pub modules: Value,
     /// `[bar.groups.<nombre>]`: los `group/<nombre>` (con `drawer`, cajones)
     pub groups: Value,
+    /// `[bar.hover]`: los colores (fg, bg) del módulo bajo el mouse, y en
+    /// cuáles (`modules`; sin lista, en todos)
+    pub hover: Value,
+    /// `[bar.hover-workspaces]`: los del botón de workspace bajo el mouse
+    /// (fg, bg, y active-fg, active-bg si es el activo)
+    pub hover_ws: Value,
 }
 
 impl Default for Bar {
@@ -56,6 +62,8 @@ impl Default for Bar {
                 .to_vec(),
             modules: Value::Null,
             groups: Value::Null,
+            hover: Value::Null,
+            hover_ws: Value::Null,
         }
     }
 }
@@ -105,5 +113,7 @@ pub fn load() -> Bar {
     b.right = list("right").unwrap_or(b.right);
     b.modules = v["modules"].clone();
     b.groups = v["groups"].clone();
+    b.hover = v["hover"].clone();
+    b.hover_ws = v["hover-workspaces"].clone();
     b
 }

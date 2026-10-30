@@ -165,7 +165,17 @@ pub fn fill(tpl: &str, vals: &[(&str, Val)]) -> String {
     out
 }
 
-fn color(look: &Look, v: &str) -> Option<Color> {
+/// Un color de la config del look: los del tema (primary, fg…), los de
+/// colors.json (`color12`, `background`, `rec`…), `#rrggbb`, o
+/// `alpha(<color>, 0.2)` como en el CSS de waybar (mezclado con el fondo de la
+/// barra).
+pub fn color(look: &Look, v: &str) -> Option<Color> {
+    let v = v.trim();
+    if let Some(inner) = v.strip_prefix("alpha(").and_then(|r| r.strip_suffix(')')) {
+        let (c, a) = inner.rsplit_once(',')?;
+        let a: f32 = a.trim().parse().ok()?;
+        return hex(&mix(color(look, c)?, look.theme.base, a.clamp(0.0, 1.0)));
+    }
     let t = look.theme;
     Some(match v {
         "primary" => t.primary,

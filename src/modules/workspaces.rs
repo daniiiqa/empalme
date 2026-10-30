@@ -3,7 +3,7 @@
 //! tienen ventanas, con el color del texto; los vacíos, apagados. Clic va a
 //! ese workspace, la rueda al siguiente o anterior.
 
-use super::{Act, Ev, Module, script};
+use super::{Act, Ev, Module, Part, script};
 use crate::hypr;
 use discada_kit::look::Look;
 use ratatui::style::Style;
@@ -65,6 +65,18 @@ impl Module for Workspaces {
             })
             .collect::<Vec<_>>();
         Some(Line::from(spans))
+    }
+
+    fn part(&self, col: u16) -> Option<Part> {
+        let mut x = 0u16;
+        for &(id, _) in &self.list {
+            let w = Self::label(id).len() as u16;
+            if col >= x && col < x + w {
+                return Some((x, w, id == self.active));
+            }
+            x += w;
+        }
+        None
     }
 
     fn act(&mut self, act: Act, col: u16) {

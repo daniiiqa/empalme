@@ -18,8 +18,9 @@ use bar::{Bar, Style};
 use drawer::Drawer;
 use discada_kit::look::Look;
 use discada_kit::paint::{Painter, rounded};
-use modules::{Act, Ctx, Ev, Module};
+use modules::{Act, Ctx, Ev, Module, Part};
 use ratatui::buffer::Buffer;
+use ratatui::style::Color;
 use ratatui::layout::Rect;
 use smithay_client_toolkit::reexports::calloop::EventLoop;
 use smithay_client_toolkit::reexports::calloop::channel::{Event, channel};
@@ -63,6 +64,19 @@ struct Slot {
     width: f32,
     clip: f32,
     full: u16,
+    /// el ancho de una celda de este módulo (su tamaño de letra)
+    cw: f32,
+}
+
+/// Cómo se marca lo que está bajo el mouse: en qué lugar, de qué celda a qué
+/// celda de su cuadro, y los colores.
+#[derive(Clone, Copy)]
+struct Hover {
+    slot: usize,
+    from: u16,
+    to: u16,
+    fg: Option<Color>,
+    bg: Option<Color>,
 }
 
 /// Los módulos de la barra, y de qué cajón es cada uno.
@@ -72,6 +86,10 @@ struct Built {
     /// (cajón, ¿es el primero, el que siempre se ve?)
     member: Vec<Option<(usize, bool)>>,
     drawers: Vec<Drawer>,
+    /// el tipo de cada módulo (`cpu` de `cpu#otro`), para `[bar.hover]`
+    names: Vec<String>,
+    /// su `font-size` propio, si tiene (los íconos de las apps, más grandes)
+    sizes: Vec<Option<f32>>,
 }
 
 struct App {
@@ -91,11 +109,18 @@ struct App {
     scroll: f64,
     look: Look,
     painter: Painter,
+    /// los de otro tamaño de letra: (tamaño, painter), y cuál usa cada módulo
+    painters: Vec<(f32, Painter)>,
+    painter_of: Vec<Option<usize>>,
     bar: Bar,
     /// (sección 0 izquierda, 1 centro, 2 derecha; el módulo)
     modules: Vec<(u8, Box<dyn Module>)>,
     member: Vec<Option<(usize, bool)>>,
     drawers: Vec<Drawer>,
+    names: Vec<String>,
+    /// el mouse sobre la barra (x en pixeles), y qué tiene debajo
+    hover_x: Option<f32>,
+    hovered: Option<(usize, Option<u16>)>,
     /// el último cuadro de los cajones (para saber cuánto avanzar)
     last_frame: Option<Instant>,
     /// ya se pidió al compositor que avise del siguiente cuadro
@@ -113,11 +138,25 @@ struct App {
 }
 
 fn build(bar: &Bar, ctx: &Ctx) -> Built {
-    let mut out = Built { modules: Vec::new(), member: Vec::new(), drawers: Vec::new() };
+    let mut out = Built { modules: Vec::new(), member: Vec::new(), drawers: Vec::new(), names: Vec::new(), sizes: Vec::new() };
     let add = |out: &mut Built, sect: u8, name: &str, member: Option<(usize, bool)>| {
-        if let Some(m) = modules::make(name, fmt::Conf(bar.modules[name].clone()), ctx) {
+        // `[bar.modules.app]` vale para todos los `app#…`; lo de cada uno encima
+        let kind = name.split('#').next().unwrap_or(name);
+        let mut v = bar.modules[kind].clone();
+        if kind != name
+            && let (Some(base), Some(own)) = (v.as_object_mut(), bar.modules[name].as_object())
+        {
+            base.extend(own.clone());
+        } else if kind != name && !bar.modules[name].is_null() {
+            v = bar.modules[name].clone();
+        }
+        let conf = fmt::Conf(v);
+        let size = conf.num("font-size").map(|f| f.clamp(6.0, 60.0) as f32);
+        if let Some(m) = modules::make(name, conf, ctx) {
+            out.sizes.push(size);
             out.modules.push((sect, m));
             out.member.push(member);
+            out.names.push(name.split('#').next().unwrap_or(name).to_string());
         }
     };
     for (sect, names) in [&bar.left, &bar.center, &bar.right].into_iter().enumerate() {
@@ -210,15 +249,16 @@ impl App {
         let s = self.scale.max(1);
         let (w, h) = (self.size.0 as i32 * s, self.size.1 as i32 * s);
         let Some(mut pix) = tiny_skia::Pixmap::new(w as u32, h as u32) else { return };
-        let (cw, ch) = (self.painter.cw, self.painter.ch);
+        let cw = self.painter.cw;
         let (pad, gap) = (self.bar.pad, self.bar.gap as f32 * cw);
 
         // qué muestra cada módulo y cuánto mide
         let lines: Vec<_> = self.modules.iter().map(|(sect, m)| (*sect, m.line(&self.look))).collect();
         let full: Vec<Option<u16>> = lines.iter().map(|(_, l)| l.as_ref().map(|l| l.width() as u16 + 2 * pad)).collect();
+        let cws: Vec<f32> = self.painter_of.iter().map(|p| p.map_or(cw, |j| self.painters[j].1.cw)).collect();
         // lo que se ve de cada uno (los que salen de un cajón, a medio abrir):
         // (visible, escondido a la izquierda), en pixeles
-        let mut shown: Vec<(f32, f32)> = full.iter().map(|w| (w.unwrap_or(0) as f32 * cw, 0.0)).collect();
+        let mut shown: Vec<(f32, f32)> = full.iter().zip(&cws).map(|(w, cw)| (w.unwrap_or(0) as f32 * cw, 0.0)).collect();
         for (g, d) in self.drawers.iter().enumerate() {
             let rest: Vec<usize> = (0..full.len()).filter(|&i| self.member[i] == Some((g, false)) && full[i].is_some()).collect();
             let widths: Vec<f32> = rest.iter().map(|&i| shown[i].0).collect();
@@ -238,7 +278,7 @@ impl App {
             };
             for i in items {
                 let (width, clip) = shown[i];
-                self.slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap() });
+                self.slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap(), cw: cws[i] });
                 x += width + gap;
             }
         }
@@ -258,20 +298,61 @@ impl App {
             }
         }
 
+        // lo que está bajo el mouse: su fondo (de todo el alto, como en waybar)
+        let hov = self.hover_style();
+        if let Some(Hover { slot, from, to, bg: Some(bg), .. }) = hov {
+            let sl = &self.slots[slot];
+            let x0 = (sl.start - sl.clip + from as f32 * sl.cw).max(sl.start);
+            let x1 = (sl.start - sl.clip + to as f32 * sl.cw).min(sl.start + sl.width);
+            if x1 > x0 {
+                rounded(&mut pix, px(x0), 0.0, px(x1) - px(x0), h as f32, r, bg, alpha);
+            }
+        }
+
         // el texto, centrado de alto en la barra; a medio abrir, en su propio
         // cuadro corrido a la izquierda lo escondido, y solo lo que se ve
-        let oy = ((h as f32 - ch * sf) / 2.0).floor();
-        for sl in &self.slots {
+        for (k, sl) in self.slots.iter().enumerate() {
+            let painter = match self.painter_of[sl.module] {
+                Some(j) => &mut self.painters[j].1,
+                None => &mut self.painter,
+            };
+            let oy = ((h as f32 - painter.ch * sf) / 2.0).floor();
+            // la línea de abajo (la app enfocada): 2 pixeles, como en waybar
+            if let Some(c) = self.modules[sl.module].1.underline(&self.look)
+                && let Some(r) = tiny_skia::Rect::from_xywh(px(sl.start), h as f32 - 2.0 * sf, px(sl.start + sl.width) - px(sl.start), 2.0 * sf)
+            {
+                let mut paint = tiny_skia::Paint::default();
+                if let Color::Rgb(r_, g, b) = c {
+                    paint.set_color_rgba8(r_, g, b, 255);
+                }
+                pix.fill_rect(r, &paint, tiny_skia::Transform::identity(), None);
+            }
             let Some(line) = &lines[sl.module].1 else { continue };
             let mut one = Buffer::empty(Rect::new(0, 0, sl.full, 1));
             one.set_line(pad, 0, line, sl.full.saturating_sub(2 * pad));
-            if sl.width >= sl.full as f32 * cw - 0.01 {
-                self.painter.cells(&mut pix, &one, &self.look, px(sl.start), oy, sf);
+            if let Some(Hover { slot, from, to, fg, bg }) = hov
+                && slot == k
+            {
+                for x in from..to.min(sl.full) {
+                    let cell = &mut one[(x, 0)];
+                    if let Some(fg) = fg {
+                        cell.set_fg(fg);
+                    }
+                    // las celdas con fondo propio (el workspace activo) también
+                    if let Some(bg) = bg
+                        && cell.bg != Color::Reset
+                    {
+                        cell.set_bg(bg);
+                    }
+                }
+            }
+            if sl.width >= sl.full as f32 * sl.cw - 0.01 {
+                painter.cells(&mut pix, &one, &self.look, px(sl.start), oy, sf);
                 continue;
             }
             let vis = (px(sl.start + sl.width) - px(sl.start)) as u32;
             let Some(mut part) = tiny_skia::Pixmap::new(vis.max(1), h as u32) else { continue };
-            self.painter.cells(&mut part, &one, &self.look, -px(sl.clip), oy, sf);
+            painter.cells(&mut part, &one, &self.look, -px(sl.clip), oy, sf);
             pix.draw_pixmap(px(sl.start) as i32, 0, part.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
         }
 
@@ -303,7 +384,7 @@ impl App {
     fn act(&mut self, act: Act) {
         let x = self.pointer_x as f32;
         let Some(sl) = self.slots.iter().find(|s| x >= s.start && x < s.start + s.width) else { return };
-        let rel = ((x - sl.start + sl.clip) / self.painter.cw) as u16;
+        let rel = ((x - sl.start + sl.clip) / sl.cw) as u16;
         let rel = rel.saturating_sub(self.bar.pad);
         let i = sl.module;
         self.modules[i].1.act(act, rel);
@@ -315,6 +396,14 @@ impl App {
     /// El mouse en x (pixeles; None: se fue de la barra): abrir el cajón que
     /// tenga debajo y cerrar los demás.
     fn hover(&mut self, x: Option<f64>) {
+        self.hover_x = x.map(|x| x as f32);
+        let now = self.under_mouse().map(|(sl, part)| (self.slots[sl].module, part.map(|p| p.0)));
+        if now != self.hovered {
+            self.hovered = now;
+            if !self.drawers_moving() {
+                self.redraw();
+            }
+        }
         let g = x.and_then(|x| {
             let x = x as f32;
             let sl = self.slots.iter().find(|s| x >= s.start && x < s.start + s.width)?;
@@ -327,6 +416,57 @@ impl App {
         // empezó a moverse: el primer cuadro ya, los demás con el compositor
         if !was && self.drawers_moving() && !self.frame_pending {
             self.frame();
+        }
+    }
+
+    /// Un painter por cada tamaño de letra propio que pidan los módulos.
+    fn make_painters(&mut self, sizes: &[Option<f32>]) {
+        self.painters.retain(|(sz, _)| sizes.contains(&Some(*sz)));
+        self.painter_of = sizes
+            .iter()
+            .map(|sz| {
+                let sz = (*sz)?;
+                Some(self.painters.iter().position(|(p, _)| *p == sz).unwrap_or_else(|| {
+                    self.painters.push((sz, Painter::sized(Some(sz))));
+                    self.painters.len() - 1
+                }))
+            })
+            .collect();
+    }
+
+    /// Lo que está bajo el mouse: (el lugar, y el botón de adentro si tiene).
+    fn under_mouse(&self) -> Option<(usize, Option<Part>)> {
+        let x = self.hover_x?;
+        let k = self.slots.iter().position(|s| x >= s.start && x < s.start + s.width)?;
+        let sl = &self.slots[k];
+        let col = ((x - sl.start + sl.clip) / sl.cw) as u16;
+        Some((k, self.modules[sl.module].1.part(col.saturating_sub(self.bar.pad))))
+    }
+
+    /// Cómo se marca lo que está bajo el mouse (según `[bar.hover]`).
+    fn hover_style(&self) -> Option<Hover> {
+        let (k, part) = self.under_mouse()?;
+        let sl = &self.slots[k];
+        let pad = self.bar.pad;
+        let c = |conf: &serde_json::Value, key: &str| conf[key].as_str().and_then(|v| fmt::color(&self.look, v));
+        match part {
+            Some((a, w, active)) => {
+                let h = &self.bar.hover_ws;
+                if h.is_null() {
+                    return None;
+                }
+                let (fg, bg) = if active { ("active-fg", "active-bg") } else { ("fg", "bg") };
+                Some(Hover { slot: k, from: pad + a, to: pad + a + w, fg: c(h, fg), bg: c(h, bg) })
+            }
+            None => {
+                let h = &self.bar.hover;
+                let name = &self.names[sl.module];
+                let listed = h["modules"].as_array().is_none_or(|l| l.iter().any(|m| m.as_str() == Some(name)));
+                if h.is_null() || !listed || name == "workspaces" {
+                    return None;
+                }
+                Some(Hover { slot: k, from: 0, to: sl.full, fg: c(h, "fg"), bg: c(h, "bg") })
+            }
         }
     }
 
@@ -393,7 +533,10 @@ impl App {
             self.bar = bar::load();
             self.painter = Painter::sized(self.bar.font_size);
             let b = build(&self.bar, &Ctx { idle: self.idle.clone() });
-            (self.modules, self.member, self.drawers) = (b.modules, b.member, b.drawers);
+            (self.modules, self.member, self.drawers, self.names) = (b.modules, b.member, b.drawers, b.names);
+            self.painters.clear();
+            self.make_painters(&b.sizes);
+            self.hovered = None;
             if self.hidden {
                 return;
             }
@@ -402,6 +545,9 @@ impl App {
             self.create_layer();
         } else {
             self.painter = Painter::sized(self.bar.font_size);
+            for (sz, p) in &mut self.painters {
+                *p = Painter::sized(Some(*sz));
+            }
             self.redraw();
         }
     }
@@ -448,6 +594,7 @@ fn run() -> Result<(), String> {
     let idle = Rc::new(Cell::new(false));
     let ctx = Ctx { idle: idle.clone() };
     let built = build(&bar, &ctx);
+    let built_sizes = built.sizes.clone();
     let mut app = App {
         registry: RegistryState::new(&globals),
         seat: SeatState::new(&globals, &qh),
@@ -465,9 +612,14 @@ fn run() -> Result<(), String> {
         scroll: 0.0,
         look: Look::load("empalme"),
         painter: Painter::sized(bar.font_size),
+        painters: Vec::new(),
+        painter_of: Vec::new(),
         modules: built.modules,
         member: built.member,
         drawers: built.drawers,
+        names: built.names,
+        hover_x: None,
+        hovered: None,
         last_frame: None,
         frame_pending: false,
         last_pulse: Instant::now(),
@@ -479,6 +631,7 @@ fn run() -> Result<(), String> {
         inhibitor: None,
         qh,
     };
+    app.make_painters(&built_sizes);
     app.create_layer();
 
     let mut last_sec = 0;

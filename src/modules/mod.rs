@@ -2,6 +2,7 @@
 //! con el look) y qué hacer con un clic o la rueda; para casi todo llama a los
 //! scripts de discada, igual que lo hacía waybar.
 
+pub mod app;
 pub mod audio;
 pub mod battery;
 pub mod bluetooth;
@@ -45,6 +46,9 @@ pub enum Ev {
     Tick,
 }
 
+/// Un botón dentro de un módulo: (inicio, ancho, ¿es el activo?), en celdas.
+pub type Part = (u16, u16, bool);
+
 pub trait Module {
     /// Lo que se ve; None: el módulo no aparece (sin batería, por ejemplo).
     fn line(&self, look: &Look) -> Option<Line<'static>>;
@@ -52,6 +56,16 @@ pub trait Module {
     fn act(&mut self, act: Act, col: u16);
     /// ¿Hay que redibujar?
     fn update(&mut self, ev: &Ev) -> bool;
+    /// Si el módulo tiene botones por dentro (los workspaces): el que está en
+    /// la celda `col` (desde su texto), como (inicio, ancho, ¿es el activo?).
+    /// None: el hover es de todo el módulo.
+    fn part(&self, _col: u16) -> Option<Part> {
+        None
+    }
+    /// Una línea abajo del módulo, de este color (la app enfocada).
+    fn underline(&self, _look: &Look) -> Option<ratatui::style::Color> {
+        None
+    }
     /// ¿Se está moviendo (el grabador pulsando)? La barra lo redibuja seguido.
     fn animating(&self) -> bool {
         false
@@ -67,8 +81,9 @@ pub struct Ctx {
 }
 
 pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
-    let kind = name.split('#').next().unwrap_or(name);
+    let (kind, tag) = name.split_once('#').unwrap_or((name, ""));
     Some(match kind {
+        "app" => Box::new(app::App::new(tag, conf)),
         "workspaces" => Box::new(workspaces::Workspaces::new()),
         "clock" => Box::new(clock::Clock::new(conf)),
         "battery" => Box::new(battery::Battery::new()),
