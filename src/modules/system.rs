@@ -5,7 +5,7 @@
 //! sistema. Cada uno se relee a su ritmo (`interval`, en segundos).
 
 use super::{Act, Ev, Module, script, show, template};
-use crate::fmt::{Conf, Val, pick};
+use crate::fmt::{Conf, Val, named, pick};
 use discada_kit::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -207,7 +207,8 @@ impl Module for System {
         };
         let mut vals: Vec<(&str, Val)> = self.vals.iter().map(|(k, v)| (*k, Val::Num(*v))).collect();
         vals.extend(self.texts.iter().map(|(k, v)| (k.as_str(), Val::Text(v.clone()))));
-        show(look, &tpl, &vals, Style::new().fg(if self.critical { t.red } else { t.fg }))
+        let critical = named("critical").unwrap_or(t.red);
+        show(look, &tpl, &vals, Style::new().fg(if self.critical { critical } else { t.fg }))
     }
 
     fn act(&mut self, act: Act, _: u16) {

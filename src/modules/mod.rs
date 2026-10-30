@@ -52,6 +52,10 @@ pub trait Module {
     fn act(&mut self, act: Act, col: u16);
     /// ¿Hay que redibujar?
     fn update(&mut self, ev: &Ev) -> bool;
+    /// ¿Se está moviendo (el grabador pulsando)? La barra lo redibuja seguido.
+    fn animating(&self) -> bool {
+        false
+    }
 }
 
 /// El módulo `name` (`cpu`, o `cpu#otro` para tener dos con distinta

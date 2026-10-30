@@ -34,6 +34,8 @@ pub struct Bar {
     pub right: Vec<String>,
     /// `[bar.modules.<nombre>]`: los formatos y ajustes de cada módulo
     pub modules: Value,
+    /// `[bar.groups.<nombre>]`: los `group/<nombre>` (con `drawer`, cajones)
+    pub groups: Value,
 }
 
 impl Default for Bar {
@@ -53,6 +55,7 @@ impl Default for Bar {
                 .map(String::from)
                 .to_vec(),
             modules: Value::Null,
+            groups: Value::Null,
         }
     }
 }
@@ -101,5 +104,6 @@ pub fn load() -> Bar {
     b.center = list("center").unwrap_or(b.center);
     b.right = list("right").unwrap_or(b.right);
     b.modules = v["modules"].clone();
+    b.groups = v["groups"].clone();
     b
 }

@@ -2,12 +2,50 @@
 //! pasar un look sea copiar: `{usage}`, `{used:0.1f}`, `{usage:>2}`, `{icon}`,
 //! y el marcado de pango que usan los looks (`<span foreground="#…">`, `<b>`).
 //! Además de colores `#rrggbb`, el marcado entiende los del look: primary,
-//! accent, fg, muted, red, green.
+//! accent, fg, muted, red, green, y los de `~/.config/empalme/colors.json`
+//! (que escribe LookBuild.py: color0…color15 y los nombres propios del look,
+//! como rec o critical).
 
 use discada_kit::look::Look;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::RwLock;
+use std::time::SystemTime;
+
+static PALETTE: RwLock<Option<HashMap<String, Color>>> = RwLock::new(None);
+
+fn palette_path() -> PathBuf {
+    crate::bar::path().with_file_name("colors.json")
+}
+
+pub fn palette_stamp() -> Option<SystemTime> {
+    std::fs::metadata(palette_path()).and_then(|m| m.modified()).ok()
+}
+
+/// (Re)leer los colores del look.
+pub fn load_palette() {
+    let map = std::fs::read_to_string(palette_path())
+        .ok()
+        .and_then(|t| serde_json::from_str::<HashMap<String, String>>(&t).ok())
+        .map(|m| m.into_iter().filter_map(|(k, v)| Some((k, hex(&v)?))).collect());
+    if let Ok(mut p) = PALETTE.write() {
+        *p = map;
+    }
+}
+
+/// Un color con nombre del look (`rec`, `critical`, `color4`…).
+pub fn named(name: &str) -> Option<Color> {
+    PALETTE.read().ok()?.as_ref()?.get(name).copied()
+}
+
+fn hex(v: &str) -> Option<Color> {
+    let h = v.strip_prefix('#')?;
+    let n = u32::from_str_radix(h.get(..6)?, 16).ok()?;
+    Some(Color::Rgb((n >> 16) as u8, (n >> 8) as u8, n as u8))
+}
 
 /// Un valor para una plantilla.
 pub enum Val {
@@ -136,12 +174,20 @@ fn color(look: &Look, v: &str) -> Option<Color> {
         "muted" => t.muted,
         "red" => t.red,
         "green" => t.green,
-        _ => {
-            let h = v.strip_prefix('#')?;
-            let n = u32::from_str_radix(h.get(..6)?, 16).ok()?;
-            Color::Rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
-        }
+        _ => return hex(v).or_else(|| named(v)),
     })
+}
+
+/// `a` sobre `b` con opacidad `k` (0 a 1), en `#rrggbb` para el marcado: así
+/// se hace la opacidad del CSS de waybar (el pulso del grabador).
+pub fn mix(a: Color, b: Color, k: f32) -> String {
+    let rgb = |c: Color| match c {
+        Color::Rgb(r, g, b) => (r as f32, g as f32, b as f32),
+        _ => (128.0, 128.0, 128.0),
+    };
+    let (a, b) = (rgb(a), rgb(b));
+    let m = |x: f32, y: f32| (x * k + y * (1.0 - k)).round().clamp(0.0, 255.0) as u8;
+    format!("#{:02x}{:02x}{:02x}", m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
 /// `name="valor"` de una etiqueta.

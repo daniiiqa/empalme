@@ -2,10 +2,11 @@
 //! el replay está prendido. Lo lee del estado que deja Recorder.sh en
 //! $XDG_RUNTIME_DIR/recorder (sin correr `Recorder.sh status` cada segundo,
 //! como hacía waybar). Las etiquetas son del look: `rec`, `paused`, `replay`.
-//! Clic: detener (o guardar el replay); medio: pausa; derecho: el menú.
+//! Como en el CSS de los looks: rojo y pulsando mientras graba, más tenue en
+//! pausa. Clic: detener (o guardar el replay); medio: pausa; derecho: el menú.
 
 use super::{Act, Ev, Module, script, show};
-use crate::fmt::Conf;
+use crate::fmt::{Conf, mix, named};
 use discada_kit::look::Look;
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -69,13 +70,18 @@ impl Module for Recorder {
         let n = &self.now;
         let mut parts = Vec::new();
         if let Some(secs) = n.rec {
-            let (key, icon, text, color) = if n.paused {
-                ("paused", "\u{f03e5}", "[||]", "muted")
+            // la opacidad: 60% en pausa; grabando, de 100% a 55% y de vuelta en 1.6 s
+            let k = if n.paused {
+                0.6
             } else {
-                ("rec", "\u{f044b}", "[rec]", "red")
+                let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() % 1600).unwrap_or(0) as f32;
+                0.775 + 0.225 * (ms / 1600.0 * std::f32::consts::TAU).cos()
             };
+            // el `rec` del look, como el @rec de su CSS
+            let color = mix(named("rec").unwrap_or(t.red), t.base, k);
+            let (key, icon, text) = if n.paused { ("paused", "\u{f03e5}", "[||]") } else { ("rec", "\u{f044b}", "[rec]") };
             let label = self.label(look, key, icon, text);
-            parts.push(format!("<span color=\"{color}\">{label}</span> {:02}:{:02}", secs / 60, secs % 60));
+            parts.push(format!("<span color=\"{color}\">{label} {:02}:{:02}</span>", secs / 60, secs % 60));
         }
         if n.replay {
             parts.push(self.label(look, "replay", "\u{f0459}", "[rpl]"));
@@ -90,6 +96,10 @@ impl Module for Recorder {
             Act::Right => script("Recorder.sh", &["menu"]),
             _ => {}
         }
+    }
+
+    fn animating(&self) -> bool {
+        self.now.rec.is_some() && !self.now.paused
     }
 
     fn update(&mut self, ev: &Ev) -> bool {

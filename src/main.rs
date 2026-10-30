@@ -8,12 +8,14 @@
 //! Por ahora corre junto a waybar: `pkill -SIGUSR1 waybar` esconde waybar.
 
 mod bar;
+mod drawer;
 mod fmt;
 mod hypr;
 mod modules;
 mod signals;
 
 use bar::{Bar, Style};
+use drawer::Drawer;
 use discada_kit::look::Look;
 use discada_kit::paint::{Painter, rounded};
 use modules::{Act, Ctx, Ev, Module};
@@ -31,7 +33,7 @@ use smithay_client_toolkit::reexports::protocols::wp::idle_inhibit::zv1::client:
 use std::cell::Cell;
 use std::rc::Rc;
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
@@ -46,17 +48,30 @@ use smithay_client_toolkit::{
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
-/// Dónde quedó un módulo, en celdas.
+/// Dónde quedó un módulo, en pixeles lógicos: lo que se ve (`width`) de su
+/// ancho completo (`full` celdas), con `clip` pixeles escondidos a su
+/// izquierda (un cajón a medio abrir).
 struct Slot {
     module: usize,
-    start: u16,
-    width: u16,
+    start: f32,
+    width: f32,
+    clip: f32,
+    full: u16,
+}
+
+/// Los módulos de la barra, y de qué cajón es cada uno.
+struct Built {
+    /// (sección 0 izquierda, 1 centro, 2 derecha; el módulo)
+    modules: Vec<(u8, Box<dyn Module>)>,
+    /// (cajón, ¿es el primero, el que siempre se ve?)
+    member: Vec<Option<(usize, bool)>>,
+    drawers: Vec<Drawer>,
 }
 
 struct App {
@@ -79,6 +94,14 @@ struct App {
     bar: Bar,
     /// (sección 0 izquierda, 1 centro, 2 derecha; el módulo)
     modules: Vec<(u8, Box<dyn Module>)>,
+    member: Vec<Option<(usize, bool)>>,
+    drawers: Vec<Drawer>,
+    /// el último cuadro de los cajones (para saber cuánto avanzar)
+    last_frame: Option<Instant>,
+    /// ya se pidió al compositor que avise del siguiente cuadro
+    frame_pending: bool,
+    /// el último cuadro del pulso del grabador
+    last_pulse: Instant,
     slots: Vec<Slot>,
     /// el módulo idle dice si se quiere; la barra lo pide al compositor
     idle: Rc<Cell<bool>>,
@@ -89,13 +112,45 @@ struct App {
     qh: QueueHandle<App>,
 }
 
-fn build(bar: &Bar, ctx: &Ctx) -> Vec<(u8, Box<dyn Module>)> {
-    let mut out = Vec::new();
+fn build(bar: &Bar, ctx: &Ctx) -> Built {
+    let mut out = Built { modules: Vec::new(), member: Vec::new(), drawers: Vec::new() };
+    let add = |out: &mut Built, sect: u8, name: &str, member: Option<(usize, bool)>| {
+        if let Some(m) = modules::make(name, fmt::Conf(bar.modules[name].clone()), ctx) {
+            out.modules.push((sect, m));
+            out.member.push(member);
+        }
+    };
     for (sect, names) in [&bar.left, &bar.center, &bar.right].into_iter().enumerate() {
+        let sect = sect as u8;
         for name in names {
-            if let Some(m) = modules::make(name, fmt::Conf(bar.modules[name.as_str()].clone()), ctx) {
-                out.push((sect as u8, m));
+            let Some(group) = name.strip_prefix("group/") else {
+                add(&mut out, sect, name, None);
+                continue;
+            };
+            let g = &bar.groups[group];
+            let names: Vec<&str> = g["modules"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+            if g["drawer"].is_null() || names.len() < 2 {
+                for n in names {
+                    add(&mut out, sect, n, None);
+                }
+                continue;
             }
+            let d = Drawer::new(&g["drawer"]);
+            let idx = out.drawers.len();
+            // el primero junto a los que salen: antes si salen a la derecha
+            let (lead, rest) = names.split_first().unwrap();
+            if !d.right {
+                for n in rest {
+                    add(&mut out, sect, n, Some((idx, false)));
+                }
+            }
+            add(&mut out, sect, lead, Some((idx, true)));
+            if d.right {
+                for n in rest {
+                    add(&mut out, sect, n, Some((idx, false)));
+                }
+            }
+            out.drawers.push(d);
         }
     }
     out
@@ -117,6 +172,7 @@ impl App {
         layer.commit();
         self.layer = Some(layer);
         self.configured = false;
+        self.frame_pending = false;
         // el inhibidor iba con la superficie de antes
         if let Some(i) = self.inhibitor.take() {
             i.destroy();
@@ -155,53 +211,69 @@ impl App {
         let (w, h) = (self.size.0 as i32 * s, self.size.1 as i32 * s);
         let Some(mut pix) = tiny_skia::Pixmap::new(w as u32, h as u32) else { return };
         let (cw, ch) = (self.painter.cw, self.painter.ch);
-        let cols = (self.size.0 as f32 / cw).floor() as u16;
-        let (pad, gap) = (self.bar.pad, self.bar.gap);
+        let (pad, gap) = (self.bar.pad, self.bar.gap as f32 * cw);
 
         // qué muestra cada módulo y cuánto mide
         let lines: Vec<_> = self.modules.iter().map(|(sect, m)| (*sect, m.line(&self.look))).collect();
+        let full: Vec<Option<u16>> = lines.iter().map(|(_, l)| l.as_ref().map(|l| l.width() as u16 + 2 * pad)).collect();
+        // lo que se ve de cada uno (los que salen de un cajón, a medio abrir):
+        // (visible, escondido a la izquierda), en pixeles
+        let mut shown: Vec<(f32, f32)> = full.iter().map(|w| (w.unwrap_or(0) as f32 * cw, 0.0)).collect();
+        for (g, d) in self.drawers.iter().enumerate() {
+            let rest: Vec<usize> = (0..full.len()).filter(|&i| self.member[i] == Some((g, false)) && full[i].is_some()).collect();
+            let widths: Vec<f32> = rest.iter().map(|&i| shown[i].0).collect();
+            for (k, v) in drawer::reveal(d, &widths, gap).into_iter().enumerate() {
+                shown[rest[k]] = v;
+            }
+        }
+        let bw = self.size.0 as f32;
         self.slots.clear();
         for sect in 0..3u8 {
-            let items: Vec<(usize, u16)> = lines
-                .iter()
-                .enumerate()
-                .filter(|(_, (s, l))| *s == sect && l.is_some())
-                .map(|(i, (_, l))| (i, l.as_ref().unwrap().width() as u16 + 2 * pad))
-                .collect();
-            let total: u16 = items.iter().map(|x| x.1).sum::<u16>() + gap * items.len().saturating_sub(1) as u16;
+            let items: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].0 == sect && full[i].is_some() && shown[i].0 > 0.0).collect();
+            let total: f32 = items.iter().map(|&i| shown[i].0).sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
             let mut x = match sect {
-                0 => 0,
-                1 => cols.saturating_sub(total) / 2,
-                _ => cols.saturating_sub(total),
+                0 => 0.0,
+                1 => ((bw - total) / 2.0).max(0.0),
+                _ => (bw - total).max(0.0),
             };
-            for (i, width) in items {
-                self.slots.push(Slot { module: i, start: x, width });
+            for i in items {
+                let (width, clip) = shown[i];
+                self.slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap() });
                 x += width + gap;
             }
         }
 
-        // los fondos: una isla por módulo, o una sola pieza
+        // los fondos: una isla por módulo, o una sola pieza (en pixeles del
+        // monitor, redondeados para que el texto quede nítido)
         let t = self.look.theme;
         let alpha = self.look.alpha();
-        let r = self.bar.radius * s as f32;
-        let (sw, sh) = (cw * s as f32, h as f32);
+        let sf = s as f32;
+        let r = self.bar.radius * sf;
+        let px = |v: f32| (v * sf).round();
         if self.bar.style == Style::Solid {
-            rounded(&mut pix, 0.0, 0.0, w as f32, sh, r, t.base, alpha);
+            rounded(&mut pix, 0.0, 0.0, w as f32, h as f32, r, t.base, alpha);
         } else {
             for sl in &self.slots {
-                rounded(&mut pix, sl.start as f32 * sw, 0.0, sl.width as f32 * sw, sh, r, t.base, alpha);
+                rounded(&mut pix, px(sl.start), 0.0, px(sl.start + sl.width) - px(sl.start), h as f32, r, t.base, alpha);
             }
         }
 
-        // el texto, centrado de alto en la barra
-        let mut buf = Buffer::empty(Rect::new(0, 0, cols, 1));
+        // el texto, centrado de alto en la barra; a medio abrir, en su propio
+        // cuadro corrido a la izquierda lo escondido, y solo lo que se ve
+        let oy = ((h as f32 - ch * sf) / 2.0).floor();
         for sl in &self.slots {
-            if let Some(line) = &lines[sl.module].1 {
-                buf.set_line(sl.start + pad, 0, line, sl.width.saturating_sub(2 * pad));
+            let Some(line) = &lines[sl.module].1 else { continue };
+            let mut one = Buffer::empty(Rect::new(0, 0, sl.full, 1));
+            one.set_line(pad, 0, line, sl.full.saturating_sub(2 * pad));
+            if sl.width >= sl.full as f32 * cw - 0.01 {
+                self.painter.cells(&mut pix, &one, &self.look, px(sl.start), oy, sf);
+                continue;
             }
+            let vis = (px(sl.start + sl.width) - px(sl.start)) as u32;
+            let Some(mut part) = tiny_skia::Pixmap::new(vis.max(1), h as u32) else { continue };
+            self.painter.cells(&mut part, &one, &self.look, -px(sl.clip), oy, sf);
+            pix.draw_pixmap(px(sl.start) as i32, 0, part.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
         }
-        let oy = ((h as f32 - ch * s as f32) / 2.0).floor();
-        self.painter.cells(&mut pix, &buf, &self.look, 0.0, oy, s as f32);
 
         let pool = match &mut self.pool {
             Some(p) => p,
@@ -218,6 +290,10 @@ impl App {
         let surface = layer.wl_surface();
         surface.set_buffer_scale(s);
         surface.damage_buffer(0, 0, w, h);
+        if self.drawers_moving() && !self.frame_pending {
+            surface.frame(&self.qh, FrameCallbackData(surface.clone()));
+            self.frame_pending = true;
+        }
         if buffer.attach_to(surface).is_ok() {
             layer.commit();
         }
@@ -225,14 +301,59 @@ impl App {
 
     /// Un clic o la rueda en x (pixeles): al módulo que esté ahí.
     fn act(&mut self, act: Act) {
-        let col = (self.pointer_x / self.painter.cw as f64) as u16;
-        let Some(sl) = self.slots.iter().find(|s| col >= s.start && col < s.start + s.width) else { return };
-        let rel = col.saturating_sub(sl.start + self.bar.pad);
+        let x = self.pointer_x as f32;
+        let Some(sl) = self.slots.iter().find(|s| x >= s.start && x < s.start + s.width) else { return };
+        let rel = ((x - sl.start + sl.clip) / self.painter.cw) as u16;
+        let rel = rel.saturating_sub(self.bar.pad);
         let i = sl.module;
         self.modules[i].1.act(act, rel);
         self.sync_idle();
         // lo que cambia solo con el clic (el reloj largo): de una vez
         self.draw();
+    }
+
+    /// El mouse en x (pixeles; None: se fue de la barra): abrir el cajón que
+    /// tenga debajo y cerrar los demás.
+    fn hover(&mut self, x: Option<f64>) {
+        let g = x.and_then(|x| {
+            let x = x as f32;
+            let sl = self.slots.iter().find(|s| x >= s.start && x < s.start + s.width)?;
+            self.member[sl.module].map(|m| m.0)
+        });
+        let was = self.drawers_moving();
+        for (i, d) in self.drawers.iter_mut().enumerate() {
+            d.open = g == Some(i);
+        }
+        // empezó a moverse: el primer cuadro ya, los demás con el compositor
+        if !was && self.drawers_moving() && !self.frame_pending {
+            self.frame();
+        }
+    }
+
+    /// ¿Algún cajón se está abriendo o cerrando? Esos van al ritmo de la
+    /// pantalla, con lo que avisa el compositor en cada cuadro.
+    fn drawers_moving(&self) -> bool {
+        !self.hidden && self.drawers.iter().any(Drawer::moving)
+    }
+
+    /// ¿Algún módulo se mueve solo (el grabador pulsando)? Ese con reloj.
+    fn pulsing(&self) -> bool {
+        !self.hidden && self.configured && self.modules.iter().any(|(_, m)| m.animating())
+    }
+
+    /// Un cuadro de los cajones: avanzar lo que pasó desde el anterior y
+    /// redibujar (draw pide el siguiente si siguen moviéndose).
+    fn frame(&mut self) {
+        let now = Instant::now();
+        let dt = self.last_frame.map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+        self.last_frame = Some(now);
+        for d in &mut self.drawers {
+            d.step(dt);
+        }
+        if !self.drawers_moving() {
+            self.last_frame = None;
+        }
+        self.redraw();
     }
 
     fn on_ev(&mut self, ev: Ev) {
@@ -271,7 +392,8 @@ impl App {
         if new_bar {
             self.bar = bar::load();
             self.painter = Painter::sized(self.bar.font_size);
-            self.modules = build(&self.bar, &Ctx { idle: self.idle.clone() });
+            let b = build(&self.bar, &Ctx { idle: self.idle.clone() });
+            (self.modules, self.member, self.drawers) = (b.modules, b.member, b.drawers);
             if self.hidden {
                 return;
             }
@@ -325,6 +447,7 @@ fn run() -> Result<(), String> {
     let bar = bar::load();
     let idle = Rc::new(Cell::new(false));
     let ctx = Ctx { idle: idle.clone() };
+    let built = build(&bar, &ctx);
     let mut app = App {
         registry: RegistryState::new(&globals),
         seat: SeatState::new(&globals, &qh),
@@ -342,7 +465,12 @@ fn run() -> Result<(), String> {
         scroll: 0.0,
         look: Look::load("empalme"),
         painter: Painter::sized(bar.font_size),
-        modules: build(&bar, &ctx),
+        modules: built.modules,
+        member: built.member,
+        drawers: built.drawers,
+        last_frame: None,
+        frame_pending: false,
+        last_pulse: Instant::now(),
         bar,
         slots: Vec::new(),
         idle,
@@ -355,16 +483,35 @@ fn run() -> Result<(), String> {
 
     let mut last_sec = 0;
     let mut bar_stamp = bar::stamp();
+    fmt::load_palette();
+    let mut palette_stamp = fmt::palette_stamp();
     loop {
         // despertar justo al cambiar el segundo, para que el reloj no se salte uno
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        let wait = Duration::from_millis(1000 - now.subsec_millis() as u64 + 2);
+        let mut wait = Duration::from_millis(1000 - now.subsec_millis() as u64 + 2);
+        const PULSE: Duration = Duration::from_millis(33);
+        if app.pulsing() {
+            wait = wait.min(PULSE.saturating_sub(app.last_pulse.elapsed()));
+        }
         event_loop.dispatch(wait, &mut app).map_err(|e| e.to_string())?;
+        // el pulso del grabador (si los cajones se mueven, ya se redibuja con ellos)
+        if app.pulsing() && app.last_pulse.elapsed() >= PULSE {
+            app.last_pulse = Instant::now();
+            if !app.frame_pending {
+                app.redraw();
+            }
+        }
         let sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         if sec != last_sec {
             last_sec = sec;
             app.on_ev(Ev::Tick);
-            let look_changed = app.look.refresh();
+            let mut look_changed = app.look.refresh();
+            let ps = fmt::palette_stamp();
+            if ps != palette_stamp {
+                palette_stamp = ps;
+                fmt::load_palette();
+                look_changed = true;
+            }
             let stamp = bar::stamp();
             if stamp != bar_stamp {
                 bar_stamp = stamp;
@@ -385,7 +532,12 @@ impl CompositorHandler for App {
         }
     }
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+        self.frame_pending = false;
+        if self.drawers_moving() {
+            self.frame();
+        }
+    }
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
     fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
 }
@@ -447,6 +599,7 @@ impl PointerHandler for App {
             }
             self.pointer_x = e.position.0;
             match e.kind {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => self.hover(Some(e.position.0)),
                 PointerEventKind::Press { button, .. } => match button {
                     BTN_LEFT => self.act(Act::Left),
                     BTN_RIGHT => self.act(Act::Right),
@@ -463,7 +616,10 @@ impl PointerHandler for App {
                         self.act(if down { Act::Down } else { Act::Up });
                     }
                 }
-                PointerEventKind::Leave { .. } => self.scroll = 0.0,
+                PointerEventKind::Leave { .. } => {
+                    self.scroll = 0.0;
+                    self.hover(None);
+                }
                 _ => {}
             }
         }

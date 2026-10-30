@@ -75,7 +75,7 @@ impl Module for Battery {
         let (pct, state) = self.now?;
         let t = look.theme;
         let color = match state {
-            State::Discharging if pct <= 20 => t.red,
+            State::Discharging if pct <= 20 => crate::fmt::named("critical").unwrap_or(t.red),
             State::Charging => t.green,
             _ => t.fg,
         };
