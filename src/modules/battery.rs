@@ -40,7 +40,7 @@ pub struct Battery {
 fn ask_tooltip(tip: Arc<Mutex<String>>) {
     std::thread::spawn(move || {
         let path = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/hypr/scripts/Battery.py");
-        let out = std::process::Command::new(path).arg("status").stderr(std::process::Stdio::null()).output();
+        let out = crate::signals::clean(&mut std::process::Command::new(path)).arg("status").stderr(std::process::Stdio::null()).output();
         let text = out
             .ok()
             .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())

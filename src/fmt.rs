@@ -194,8 +194,26 @@ pub fn color(look: &Look, v: &str) -> Option<Color> {
         "muted" => t.muted,
         "red" => t.red,
         "green" => t.green,
+        "white" => Color::Rgb(255, 255, 255),
+        "black" => Color::Rgb(0, 0, 0),
         _ => return hex(v).or_else(|| named(v)),
     })
+}
+
+/// Un color con su opacidad, para lo que se pinta sobre el wallpaper (los
+/// fondos y bordes de la barra): `alpha(<color>, 0.9)` deja pasar lo de atrás,
+/// en vez de mezclarse con el fondo como en `color`. `transparent`: None.
+pub fn rgba(look: &Look, v: &str) -> Option<(Color, f32)> {
+    let v = v.trim();
+    if v == "transparent" || v == "none" {
+        return None;
+    }
+    if let Some(inner) = v.strip_prefix("alpha(").and_then(|r| r.strip_suffix(')')) {
+        let (c, a) = inner.rsplit_once(',')?;
+        let (c, a0) = rgba(look, c)?;
+        return Some((c, a0 * a.trim().parse::<f32>().ok()?.clamp(0.0, 1.0)));
+    }
+    color(look, v).map(|c| (c, 1.0))
 }
 
 /// `a` sobre `b` con opacidad `k` (0 a 1), en `#rrggbb` para el marcado: así
@@ -208,6 +226,11 @@ pub fn mix(a: Color, b: Color, k: f32) -> String {
     let (a, b) = (rgb(a), rgb(b));
     let m = |x: f32, y: f32| (x * k + y * (1.0 - k)).round().clamp(0.0, 255.0) as u8;
     format!("#{:02x}{:02x}{:02x}", m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+}
+
+/// Un color como `#rrggbb` (para guardarlo donde va un nombre de color).
+pub fn hexa(c: Color) -> String {
+    mix(c, c, 1.0)
 }
 
 /// `name="valor"` de una etiqueta.
@@ -227,6 +250,21 @@ fn attrs(tag: &str) -> Vec<(&str, &str)> {
 
 fn unescape(s: &str) -> String {
     s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+}
+
+/// El texto de un marcado, sin etiquetas (para medirlo).
+pub fn plain(markup: &str) -> String {
+    let mut out = String::new();
+    let mut tag = false;
+    for c in markup.chars() {
+        match c {
+            '<' => tag = true,
+            '>' if tag => tag = false,
+            _ if !tag => out.push(c),
+            _ => {}
+        }
+    }
+    unescape(&out)
 }
 
 /// El marcado ya relleno, como renglón de la barra con `base` de estilo.

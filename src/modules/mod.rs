@@ -13,6 +13,7 @@ pub mod notifications;
 pub mod power;
 pub mod recorder;
 pub mod system;
+pub mod visualizer;
 pub mod workspaces;
 
 use crate::fmt::{Conf, Val, fill, line};
@@ -36,6 +37,10 @@ pub enum Ev {
     Audio,
     Bluetooth(bluetooth::State),
     Notifications(notifications::State),
+    /// cambió lo que suena (playerctl)
+    Player(visualizer::Player),
+    /// un cuadro de cava
+    Viz(Vec<u32>),
     /// `pkill -RTMIN+N -x empalme`: N
     Signal(i32),
     /// SIGUSR1: esconder o mostrar (la barra, no los módulos)
@@ -52,8 +57,17 @@ pub type Part = (u16, u16, bool);
 pub trait Module {
     /// Lo que se ve; None: el módulo no aparece (sin batería, por ejemplo).
     fn line(&self, look: &Look) -> Option<Line<'static>>;
+    /// Lo que se ve en la barra del monitor `out` (los workspaces marcan el
+    /// activo de cada monitor); los demás se ven igual en todos.
+    fn line_on(&self, look: &Look, _out: &str) -> Option<Line<'static>> {
+        self.line(look)
+    }
     /// Un clic o la rueda en la celda `col` del módulo (desde su texto).
     fn act(&mut self, act: Act, col: u16);
+    /// El clic en la barra del monitor `out`.
+    fn act_on(&mut self, act: Act, col: u16, _out: &str) {
+        self.act(act, col)
+    }
     /// ¿Hay que redibujar?
     fn update(&mut self, ev: &Ev) -> bool;
     /// Si el módulo tiene botones por dentro (los workspaces): el que está en
@@ -62,6 +76,9 @@ pub trait Module {
     fn part(&self, _col: u16) -> Option<Part> {
         None
     }
+    fn part_on(&self, col: u16, _out: &str) -> Option<Part> {
+        self.part(col)
+    }
     /// El tooltip: marcado como el de los formatos, un renglón por `\n`.
     /// None: sin tooltip.
     fn tooltip(&self, _look: &Look) -> Option<String> {
@@ -69,6 +86,11 @@ pub trait Module {
     }
     /// Una línea abajo del módulo, de este color (la app enfocada).
     fn underline(&self, _look: &Look) -> Option<ratatui::style::Color> {
+        None
+    }
+    /// El botón activo de adentro en el monitor `out` (el workspace activo),
+    /// para marcarlo con la línea del look.
+    fn active_part(&self, _out: &str) -> Option<Part> {
         None
     }
     /// ¿Se está moviendo (el grabador pulsando)? La barra lo redibuja seguido.
@@ -83,13 +105,15 @@ pub trait Module {
 pub struct Ctx {
     /// ¿que la pantalla no se apague? (idle)
     pub idle: std::rc::Rc<std::cell::Cell<bool>>,
+    /// para los módulos que lanzan sus propios hilos (el visualizador)
+    pub tx: smithay_client_toolkit::reexports::calloop::channel::Sender<Ev>,
 }
 
 pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
     let (kind, tag) = name.split_once('#').unwrap_or((name, ""));
     Some(match kind {
         "app" => Box::new(app::App::new(tag, conf)),
-        "workspaces" => Box::new(workspaces::Workspaces::new()),
+        "workspaces" => Box::new(workspaces::Workspaces::new(conf)),
         "clock" => Box::new(clock::Clock::new(conf)),
         "battery" => Box::new(battery::Battery::new()),
         "audio" => Box::new(audio::Audio::new(audio::Kind::Sink, conf)),
@@ -101,6 +125,7 @@ pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
         "network" => Box::new(network::Network::new(conf)),
         "bluetooth" => Box::new(bluetooth::Bluetooth::new(conf)),
         "power" => Box::new(power::Power::new(conf)),
+        "visualizer" => Box::new(visualizer::Visualizer::new(conf, ctx.tx.clone())),
         "recorder" => Box::new(recorder::Recorder::new(conf)),
         "notifications" => Box::new(notifications::Notifications::new(conf)),
         "idle" | "idle_inhibitor" => Box::new(idle::Idle::new(conf, ctx.idle.clone())),
@@ -143,7 +168,7 @@ pub fn script(name: &str, args: &[&str]) {
 }
 
 pub fn spawn(cmd: &mut Command) {
-    if let Ok(mut child) = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    if let Ok(mut child) = crate::signals::clean(cmd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
         // que no quede zombi
         std::thread::spawn(move || {
             let _ = child.wait();

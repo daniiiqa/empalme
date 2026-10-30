@@ -37,6 +37,8 @@ pub struct Tip {
     lines: Vec<Line<'static>>,
     /// desde cuándo está el mouse sobre lo mismo
     pub since: Option<Instant>,
+    /// en la barra de qué monitor
+    pub out: usize,
 }
 
 impl App {
@@ -52,7 +54,8 @@ impl App {
     /// nuevo si hay algo debajo.
     pub fn tip_reset(&mut self, again: bool) {
         self.tip_hide();
-        self.tip.since = (again && self.hovered.is_some()).then(Instant::now);
+        let hovered = self.outs.get(self.tip.out).is_some_and(|o| o.hovered.is_some());
+        self.tip.since = (again && hovered).then(Instant::now);
     }
 
     pub fn tip_hide(&mut self) {
@@ -64,8 +67,9 @@ impl App {
 
     /// El texto y dónde va (el centro del módulo, en pixeles de la barra).
     fn tip_text(&self) -> Option<(String, f32)> {
-        let (module, _) = self.hovered?;
-        let sl = self.slots.iter().find(|s| s.module == module)?;
+        let o = self.outs.get(self.tip.out)?;
+        let (module, _) = o.hovered?;
+        let sl = o.slots.iter().find(|s| s.module == module)?;
         let text = self.modules[module].1.tooltip(&self.look)?;
         (!text.trim().is_empty()).then(|| (text, sl.start + sl.width / 2.0))
     }
@@ -87,7 +91,7 @@ impl App {
         let cols = self.tip.lines.iter().map(Line::width).max().unwrap_or(0) as f32 + 2.0;
         let w = (cols * cw).ceil() as u32 + 2;
         let h = (self.tip.lines.len() as f32 * ch).ceil() as u32 + 8;
-        let bw = self.size.0 as i32;
+        let bw = self.outs[self.tip.out].size.0 as i32;
         let left = self.bar.margin[3] + ((cx - w as f32 / 2.0).round() as i32).clamp(0, (bw - w as i32).max(0));
         let want = (w, h, left);
         if let Some(layer) = &self.tip.layer {
@@ -106,7 +110,8 @@ impl App {
         if let Ok(r) = Region::new(&self.compositor) {
             surface.set_input_region(Some(r.wl_region()));
         }
-        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Overlay, Some("empalme-tooltip"), None);
+        let output = self.outs[self.tip.out].output.clone();
+        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Overlay, Some("empalme-tooltip"), Some(&output));
         let edge = if self.bar.bottom { Anchor::BOTTOM } else { Anchor::TOP };
         layer.set_anchor(edge | Anchor::LEFT);
         layer.set_margin(GAP, 0, GAP, left);
@@ -139,7 +144,7 @@ impl App {
         if !self.tip.ready || self.tip.size.0 == 0 {
             return;
         }
-        let s = self.scale.max(1);
+        let s = self.outs.get(self.tip.out).map_or(1, |o| o.scale.max(1));
         let sf = s as f32;
         let (w, h) = (self.tip.size.0 as i32 * s, self.tip.size.1 as i32 * s);
         let Some(mut pix) = tiny_skia::Pixmap::new(w as u32, h as u32) else { return };

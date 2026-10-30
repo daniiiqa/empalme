@@ -29,6 +29,21 @@ pub fn block() {
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &s, std::ptr::null_mut()) };
 }
 
+/// Que un programa que lanza empalme nazca con las señales sin bloquear: la
+/// máscara se hereda, y lo que lancen los scripts (gpu-screen-recorder guarda
+/// el replay con SIGUSR1 y pausa con SIGUSR2) no las recibiría.
+pub fn clean(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            let mut none: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut none);
+            libc::pthread_sigmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+            Ok(())
+        })
+    }
+}
+
 pub fn watch(tx: Sender<Ev>) {
     std::thread::spawn(move || {
         let s = set();

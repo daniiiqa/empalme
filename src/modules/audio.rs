@@ -82,7 +82,7 @@ fn read(kind: Kind) -> Option<Now> {
 pub fn watch(tx: Sender<Ev>) {
     std::thread::spawn(move || {
         loop {
-            let child = Command::new("pactl").arg("subscribe").stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+            let child = crate::signals::clean(&mut Command::new("pactl")).arg("subscribe").stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
             if let Ok(mut child) = child {
                 if let Some(out) = child.stdout.take() {
                     for line in BufReader::new(out).lines().map_while(Result::ok) {

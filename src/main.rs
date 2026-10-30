@@ -3,7 +3,7 @@
 //! look; cómo es la barra en cada look (arriba o abajo, alto, islas o una sola
 //! pieza, qué módulos van dónde) sale del `[bar]` de su look.toml.
 //!
-//!   empalme            la barra (en el monitor que diga Hyprland)
+//!   empalme            la barra, en cada monitor
 //!
 //! Por ahora corre junto a waybar: `pkill -SIGUSR1 waybar` esconde waybar.
 
@@ -13,6 +13,7 @@ mod fmt;
 mod hypr;
 mod modules;
 mod signals;
+mod style;
 mod tooltip;
 
 use bar::{Bar, Style};
@@ -24,7 +25,7 @@ use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 use ratatui::layout::Rect;
 use smithay_client_toolkit::reexports::calloop::EventLoop;
-use smithay_client_toolkit::reexports::calloop::channel::{Event, channel};
+use smithay_client_toolkit::reexports::calloop::channel::{Event, Sender, channel};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
@@ -64,9 +65,26 @@ struct Slot {
     start: f32,
     width: f32,
     clip: f32,
+    /// las celdas de su texto
     full: u16,
     /// el ancho de una celda de este módulo (su tamaño de letra)
     cw: f32,
+    /// pixeles: margen izquierdo y relleno a cada lado del texto (el margen
+    /// derecho ya va en el ancho)
+    ml: f32,
+    padx: f32,
+}
+
+impl Slot {
+    /// Dónde empieza su texto (aunque esté escondido a la izquierda).
+    fn text_x(&self) -> f32 {
+        self.start - self.clip + self.ml + self.padx
+    }
+
+    /// La celda de su texto en x (pixeles); 0 si cae en el relleno izquierdo.
+    fn col(&self, x: f32) -> u16 {
+        ((x - self.text_x()) / self.cw).max(0.0) as u16
+    }
 }
 
 /// Cómo se marca lo que está bajo el mouse: en qué lugar, de qué celda a qué
@@ -74,6 +92,8 @@ struct Slot {
 #[derive(Clone, Copy)]
 struct Hover {
     slot: usize,
+    /// todo el módulo (su caja), o de qué celda a qué celda de su texto
+    whole: bool,
     from: u16,
     to: u16,
     fg: Option<Color>,
@@ -91,6 +111,30 @@ struct Built {
     names: Vec<String>,
     /// su `font-size` propio, si tiene (los íconos de las apps, más grandes)
     sizes: Vec<Option<f32>>,
+    /// cómo se ve cada uno (style.rs)
+    pills: Vec<style::Pill>,
+}
+
+/// La barra en un monitor: lo suyo (superficie, tamaño, dónde quedó cada
+/// módulo, sus cajones y el mouse); los módulos son los mismos en todas.
+struct Out {
+    output: wl_output::WlOutput,
+    /// el nombre del monitor (DP-1…), para los workspaces de cada uno
+    name: String,
+    layer: LayerSurface,
+    pool: Option<SlotPool>,
+    configured: bool,
+    size: (u32, u32),
+    scale: i32,
+    slots: Vec<Slot>,
+    drawers: Vec<Drawer>,
+    /// el mouse sobre esta barra (x en pixeles), y qué tiene debajo
+    hover_x: Option<f32>,
+    hovered: Option<(usize, Option<u16>)>,
+    /// el último cuadro de los cajones (para saber cuánto avanzar)
+    last_frame: Option<Instant>,
+    /// ya se pidió al compositor que avise del siguiente cuadro
+    frame_pending: bool,
 }
 
 struct App {
@@ -100,11 +144,8 @@ struct App {
     compositor: CompositorState,
     layer_shell: LayerShell,
     shm: Shm,
-    pool: Option<SlotPool>,
-    layer: Option<LayerSurface>,
-    configured: bool,
-    size: (u32, u32),
-    scale: i32,
+    /// una barra por monitor
+    outs: Vec<Out>,
     pointer: Option<wl_pointer::WlPointer>,
     pointer_x: f64,
     scroll: f64,
@@ -117,21 +158,20 @@ struct App {
     /// (sección 0 izquierda, 1 centro, 2 derecha; el módulo)
     modules: Vec<(u8, Box<dyn Module>)>,
     member: Vec<Option<(usize, bool)>>,
+    /// los cajones como salen al armar (cada barra tiene su copia)
     drawers: Vec<Drawer>,
     names: Vec<String>,
-    /// el mouse sobre la barra (x en pixeles), y qué tiene debajo
-    hover_x: Option<f32>,
-    hovered: Option<(usize, Option<u16>)>,
+    pills: Vec<style::Pill>,
+    /// cómo se ve la barra entera, y sus secciones (izquierda, centro, derecha)
+    barbox: style::BarBox,
+    sections: [Option<style::Section>; 3],
     tip: tooltip::Tip,
-    /// el último cuadro de los cajones (para saber cuánto avanzar)
-    last_frame: Option<Instant>,
-    /// ya se pidió al compositor que avise del siguiente cuadro
-    frame_pending: bool,
     /// el último cuadro del pulso del grabador
     last_pulse: Instant,
-    slots: Vec<Slot>,
     /// el módulo idle dice si se quiere; la barra lo pide al compositor
     idle: Rc<Cell<bool>>,
+    /// para armar de nuevo los módulos (los que lanzan hilos lo necesitan)
+    tx: Sender<Ev>,
     /// escondida con SIGUSR1
     hidden: bool,
     idle_mgr: Option<ZwpIdleInhibitManagerV1>,
@@ -139,8 +179,13 @@ struct App {
     qh: QueueHandle<App>,
 }
 
+fn sections(bar: &Bar) -> [Option<style::Section>; 3] {
+    ["left", "center", "right"].map(|k| style::Section::new(&bar.sections[k]))
+}
+
 fn build(bar: &Bar, ctx: &Ctx) -> Built {
-    let mut out = Built { modules: Vec::new(), member: Vec::new(), drawers: Vec::new(), names: Vec::new(), sizes: Vec::new() };
+    let mut out = Built { modules: Vec::new(), member: Vec::new(), drawers: Vec::new(), names: Vec::new(), sizes: Vec::new(), pills: Vec::new() };
+    let pill = style::Pill::base(&bar.pill, bar.style == Style::Islands, bar.radius);
     let add = |out: &mut Built, sect: u8, name: &str, member: Option<(usize, bool)>| {
         // `[bar.modules.app]` vale para todos los `app#…`; lo de cada uno encima
         let kind = name.split('#').next().unwrap_or(name);
@@ -152,10 +197,12 @@ fn build(bar: &Bar, ctx: &Ctx) -> Built {
         } else if kind != name && !bar.modules[name].is_null() {
             v = bar.modules[name].clone();
         }
+        let module_pill = pill.with(&v);
         let conf = fmt::Conf(v);
         let size = conf.num("font-size").map(|f| f.clamp(6.0, 60.0) as f32);
         if let Some(m) = modules::make(name, conf, ctx) {
             out.sizes.push(size);
+            out.pills.push(module_pill);
             out.modules.push((sect, m));
             out.member.push(member);
             out.names.push(name.split('#').next().unwrap_or(name).to_string());
@@ -198,9 +245,14 @@ fn build(bar: &Bar, ctx: &Ctx) -> Built {
 }
 
 impl App {
-    fn create_layer(&mut self) {
+    /// La barra en el monitor `output`.
+    fn add_out(&mut self, output: wl_output::WlOutput) {
+        if self.hidden || self.outs.iter().any(|o| o.output == output) {
+            return;
+        }
+        let name = self.output.info(&output).and_then(|i| i.name).unwrap_or_default();
         let surface = self.compositor.create_surface(&self.qh);
-        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Top, Some("empalme"), None);
+        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Top, Some("empalme"), Some(&output));
         let b = &self.bar;
         let edge = if b.bottom { Anchor::BOTTOM } else { Anchor::TOP };
         layer.set_anchor(edge | Anchor::LEFT | Anchor::RIGHT);
@@ -211,24 +263,51 @@ impl App {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_size(0, b.height);
         layer.commit();
-        self.layer = Some(layer);
-        self.configured = false;
-        self.frame_pending = false;
-        // el inhibidor iba con la superficie de antes
-        if let Some(i) = self.inhibitor.take() {
-            i.destroy();
-        }
+        self.outs.push(Out {
+            output,
+            name,
+            layer,
+            pool: None,
+            configured: false,
+            size: (0, 0),
+            scale: 1,
+            slots: Vec::new(),
+            drawers: self.drawers.clone(),
+            hover_x: None,
+            hovered: None,
+            last_frame: None,
+            frame_pending: false,
+        });
         self.sync_idle();
     }
 
-    /// Que el compositor no apague la pantalla mientras el módulo idle lo pida.
+    /// Las barras de todos los monitores (de nuevo, si ya había).
+    fn make_outs(&mut self) {
+        self.drop_outs();
+        for o in self.output.outputs() {
+            self.add_out(o);
+        }
+    }
+
+    fn drop_outs(&mut self) {
+        self.tip_hide();
+        if let Some(i) = self.inhibitor.take() {
+            i.destroy();
+        }
+        self.outs.clear();
+    }
+
+    /// Que el compositor no apague la pantalla mientras el módulo idle lo
+    /// pida (sobre la superficie de la primera barra).
     fn sync_idle(&mut self) {
-        match (self.idle.get(), &self.inhibitor, &self.idle_mgr, &self.layer) {
-            (true, None, Some(mgr), Some(layer)) => {
+        let want = self.idle.get() && !self.outs.is_empty();
+        match (want, &self.inhibitor, &self.idle_mgr) {
+            (true, None, Some(mgr)) => {
+                let layer = &self.outs[0].layer;
                 self.inhibitor = Some(mgr.create_inhibitor(layer.wl_surface(), &self.qh, ()));
                 layer.commit();
             }
-            (false, Some(_), ..) => {
+            (false, Some(_), _) => {
                 if let Some(i) = self.inhibitor.take() {
                     i.destroy();
                 }
@@ -237,91 +316,169 @@ impl App {
         }
     }
 
-    fn redraw(&mut self) {
-        if self.configured {
-            self.draw();
+    /// La barra de esa superficie.
+    fn out_of(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
+        self.outs.iter().position(|o| o.layer.wl_surface() == surface)
+    }
+
+    fn redraw_all(&mut self) {
+        for i in 0..self.outs.len() {
+            self.redraw(i);
         }
     }
 
-    fn draw(&mut self) {
-        let Some(layer) = self.layer.clone() else { return };
-        if self.size.0 == 0 {
+    fn redraw(&mut self, i: usize) {
+        if self.outs.get(i).is_some_and(|o| o.configured) {
+            self.draw(i);
+        }
+    }
+
+    fn draw(&mut self, i: usize) {
+        let o = &self.outs[i];
+        if o.size.0 == 0 {
             return;
         }
-        let s = self.scale.max(1);
-        let (w, h) = (self.size.0 as i32 * s, self.size.1 as i32 * s);
+        let layer = o.layer.clone();
+        let s = o.scale.max(1);
+        let (w, h) = (o.size.0 as i32 * s, o.size.1 as i32 * s);
         let Some(mut pix) = tiny_skia::Pixmap::new(w as u32, h as u32) else { return };
         let cw = self.painter.cw;
-        let (pad, gap) = (self.bar.pad, self.bar.gap as f32 * cw);
+        let gap = self.bar.spacing.unwrap_or(self.bar.gap as f32 * cw);
+        let look = &self.look;
+        let t = look.theme;
 
-        // qué muestra cada módulo y cuánto mide
-        let lines: Vec<_> = self.modules.iter().map(|(sect, m)| (*sect, m.line(&self.look))).collect();
-        let full: Vec<Option<u16>> = lines.iter().map(|(_, l)| l.as_ref().map(|l| l.width() as u16 + 2 * pad)).collect();
+        // qué muestra cada módulo en este monitor y cuánto mide (su texto, su
+        // relleno y sus márgenes, en pixeles)
+        let lines: Vec<_> = self.modules.iter().map(|(sect, m)| (*sect, m.line_on(look, &o.name))).collect();
+        let full: Vec<Option<u16>> = lines.iter().map(|(_, l)| l.as_ref().map(|l| l.width() as u16)).collect();
         let cws: Vec<f32> = self.painter_of.iter().map(|p| p.map_or(cw, |j| self.painters[j].1.cw)).collect();
+        let padx: Vec<f32> = self.pills.iter().zip(&cws).map(|(p, cw)| p.padding.unwrap_or(self.bar.pad as f32 * cw)).collect();
+        let outer = |i: usize| full[i].map_or(0.0, |c| c as f32 * cws[i] + 2.0 * padx[i] + self.pills[i].margin[1] + self.pills[i].margin[3]);
         // lo que se ve de cada uno (los que salen de un cajón, a medio abrir):
         // (visible, escondido a la izquierda), en pixeles
-        let mut shown: Vec<(f32, f32)> = full.iter().zip(&cws).map(|(w, cw)| (w.unwrap_or(0) as f32 * cw, 0.0)).collect();
-        for (g, d) in self.drawers.iter().enumerate() {
+        let mut shown: Vec<(f32, f32)> = (0..full.len()).map(|i| (outer(i), 0.0)).collect();
+        for (g, d) in o.drawers.iter().enumerate() {
             let rest: Vec<usize> = (0..full.len()).filter(|&i| self.member[i] == Some((g, false)) && full[i].is_some()).collect();
             let widths: Vec<f32> = rest.iter().map(|&i| shown[i].0).collect();
             for (k, v) in drawer::reveal(d, &widths, gap).into_iter().enumerate() {
                 shown[rest[k]] = v;
             }
         }
-        let bw = self.size.0 as f32;
-        self.slots.clear();
+        let bw = o.size.0 as f32;
+        let mut slots = Vec::new();
+        // dónde quedó la caja de cada sección (pixeles lógicos)
+        let mut spans: Vec<(usize, f32, f32)> = Vec::new();
         for sect in 0..3u8 {
             let items: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].0 == sect && full[i].is_some() && shown[i].0 > 0.0).collect();
-            let total: f32 = items.iter().map(|&i| shown[i].0).sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
+            let (pl, pr) = self.sections[sect as usize].as_ref().map_or((0.0, 0.0), |s| s.pad);
+            let total: f32 = items.iter().map(|&i| shown[i].0).sum::<f32>() + gap * items.len().saturating_sub(1) as f32 + pl + pr;
             let mut x = match sect {
                 0 => 0.0,
                 1 => ((bw - total) / 2.0).max(0.0),
                 _ => (bw - total).max(0.0),
             };
+            if !items.is_empty() {
+                spans.push((sect as usize, x, x + total));
+            }
+            x += pl;
             for i in items {
                 let (width, clip) = shown[i];
-                self.slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap(), cw: cws[i] });
+                let p = &self.pills[i];
+                slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap(), cw: cws[i], ml: p.margin[3], padx: padx[i] });
                 x += width + gap;
             }
         }
+        self.outs[i].slots = slots;
+        let o = &self.outs[i];
 
-        // los fondos: una isla por módulo, o una sola pieza (en pixeles del
-        // monitor, redondeados para que el texto quede nítido)
-        let t = self.look.theme;
-        let alpha = self.look.alpha();
+        // la barra, en pixeles del monitor (redondeados para que el texto quede nítido)
+        let alpha = look.alpha();
         let sf = s as f32;
-        let r = self.bar.radius * sf;
         let px = |v: f32| (v * sf).round();
-        if self.bar.style == Style::Solid {
-            rounded(&mut pix, 0.0, 0.0, w as f32, h as f32, r, t.base, alpha);
-        } else {
-            for sl in &self.slots {
-                rounded(&mut pix, px(sl.start), 0.0, px(sl.start + sl.width) - px(sl.start), h as f32, r, t.base, alpha);
+        self.barbox.paint(&mut pix, look, sf, alpha);
+        for &(sect, x0, x1) in &spans {
+            if let Some(sec) = &self.sections[sect] {
+                sec.paint(&mut pix, look, px(x0), px(x1), h as f32, sf, alpha);
             }
         }
 
-        // lo que está bajo el mouse: su fondo (de todo el alto, como en waybar)
-        let hov = self.hover_style();
-        if let Some(Hover { slot, from, to, bg: Some(bg), .. }) = hov {
-            let sl = &self.slots[slot];
-            let x0 = (sl.start - sl.clip + from as f32 * sl.cw).max(sl.start);
-            let x1 = (sl.start - sl.clip + to as f32 * sl.cw).min(sl.start + sl.width);
+        // la caja de cada módulo: de su margen izquierdo al derecho, recortada a
+        // lo que se ve; lo que está bajo el mouse, con el fondo del hover
+        let hov = self.hover_style(i);
+        let boxes: Vec<(f32, f32)> = o
+            .slots
+            .iter()
+            .map(|sl| {
+                let x0 = (sl.start - sl.clip + sl.ml).max(sl.start);
+                let x1 = (sl.start - sl.clip + sl.ml + sl.full as f32 * sl.cw + 2.0 * sl.padx).min(sl.start + sl.width);
+                (x0, x1)
+            })
+            .collect();
+        // lo activo de cada uno: la app enfocada (todo el módulo) o el botón
+        // activo de adentro (el workspace), en celdas de su texto
+        let active: Vec<Option<(Color, Option<Part>)>> = o
+            .slots
+            .iter()
+            .map(|sl| {
+                let m = &self.modules[sl.module].1;
+                m.underline(look).map(|c| (c, None)).or_else(|| {
+                    let p = &self.pills[sl.module];
+                    let c = p.active_color.as_deref().and_then(|v| fmt::color(look, v))?;
+                    m.active_part(&o.name).map(|part| (c, Some(part)))
+                })
+            })
+            .collect();
+        for (k, sl) in o.slots.iter().enumerate() {
+            let p = &self.pills[sl.module];
+            let (x0, x1) = boxes[k];
+            let (mt, mb) = (p.margin[0], p.margin[2]);
+            let mut p = p.clone();
+            if let Some((_, None)) = active[k] {
+                if let Some(b) = &p.active_border {
+                    p.border = Some(b.clone());
+                }
+                if let Some(b) = &p.active_bg {
+                    p.bg = Some(b.clone());
+                }
+            }
+            if let Some(Hover { slot, whole: true, bg: Some(bg), .. }) = hov
+                && slot == k
+            {
+                p.bg = Some(fmt::hexa(bg));
+            }
+            p.paint(&mut pix, look, px(x0), px(mt), px(x1) - px(x0), h as f32 - px(mt) - px(mb), sf, alpha);
+        }
+        if let Some(Hover { slot, whole: false, from, to, bg: Some(bg), .. }) = hov {
+            let sl = &o.slots[slot];
+            let x0 = (sl.text_x() + from as f32 * sl.cw).max(sl.start);
+            let x1 = (sl.text_x() + to as f32 * sl.cw).min(sl.start + sl.width);
             if x1 > x0 {
-                rounded(&mut pix, px(x0), 0.0, px(x1) - px(x0), h as f32, r, bg, alpha);
+                rounded(&mut pix, px(x0), 0.0, px(x1) - px(x0), h as f32, self.bar.radius * sf, bg, alpha);
             }
         }
 
         // el texto, centrado de alto en la barra; a medio abrir, en su propio
-        // cuadro corrido a la izquierda lo escondido, y solo lo que se ve
-        for (k, sl) in self.slots.iter().enumerate() {
+        // cuadro y solo lo que se ve
+        for (k, sl) in self.outs[i].slots.iter().enumerate() {
             let painter = match self.painter_of[sl.module] {
                 Some(j) => &mut self.painters[j].1,
                 None => &mut self.painter,
             };
             let oy = ((h as f32 - painter.ch * sf) / 2.0).floor();
-            // la línea de abajo (la app enfocada): 2 pixeles, como en waybar
-            if let Some(c) = self.modules[sl.module].1.underline(&self.look)
-                && let Some(r) = tiny_skia::Rect::from_xywh(px(sl.start), h as f32 - 2.0 * sf, px(sl.start + sl.width) - px(sl.start), 2.0 * sf)
+            let (x0, x1) = boxes[k];
+            // la línea de lo activo: 2 pixeles abajo (o arriba), de todo el
+            // módulo o de su botón activo, como el border del CSS
+            let pill = &self.pills[sl.module];
+            let line = active[k].filter(|_| pill.active_border.is_none() && pill.active_bg.is_none()).map(|(c, part)| {
+                let c = pill.active_color.as_deref().and_then(|v| fmt::color(look, v)).unwrap_or(c);
+                match part {
+                    Some((a, w, _)) => (c, sl.text_x() + a as f32 * sl.cw, sl.text_x() + (a + w) as f32 * sl.cw),
+                    None => (c, x0, x1),
+                }
+            });
+            let ly = if pill.line_top { pill.margin[0] * sf } else { h as f32 - (pill.margin[2] + 2.0) * sf };
+            if let Some((c, lx0, lx1)) = line
+                && let Some(r) = tiny_skia::Rect::from_xywh(px(lx0), ly.round(), px(lx1) - px(lx0), 2.0 * sf)
             {
                 let mut paint = tiny_skia::Paint::default();
                 if let Color::Rgb(r_, g, b) = c {
@@ -330,12 +487,30 @@ impl App {
                 pix.fill_rect(r, &paint, tiny_skia::Transform::identity(), None);
             }
             let Some(line) = &lines[sl.module].1 else { continue };
-            let mut one = Buffer::empty(Rect::new(0, 0, sl.full, 1));
-            one.set_line(pad, 0, line, sl.full.saturating_sub(2 * pad));
-            if let Some(Hover { slot, from, to, fg, bg }) = hov
+            let mut one = Buffer::empty(Rect::new(0, 0, sl.full.max(1), 1));
+            one.set_line(0, 0, line, sl.full);
+            // el color y el grueso de las letras del módulo, si el look los cambia
+            let pfg = pill.text(look);
+            // activo con su color de letras (loteria): todas, aunque el módulo pinte las suyas
+            let afg = matches!(active[k], Some((_, None))).then(|| pill.active_fg.as_deref().and_then(|v| fmt::color(look, v))).flatten();
+            for x in 0..sl.full {
+                let cell = &mut one[(x, 0)];
+                if let Some(c) = afg {
+                    cell.set_fg(c);
+                } else if let Some(c) = pfg
+                    && (cell.fg == t.fg || cell.fg == Color::Reset)
+                {
+                    cell.set_fg(c);
+                }
+                if pill.bold {
+                    cell.modifier.insert(ratatui::style::Modifier::BOLD);
+                }
+            }
+            if let Some(Hover { slot, from, to, fg, bg, whole }) = hov
                 && slot == k
             {
-                for x in from..to.min(sl.full) {
+                let (from, to) = if whole { (0, sl.full) } else { (from, to.min(sl.full)) };
+                for x in from..to {
                     let cell = &mut one[(x, 0)];
                     if let Some(fg) = fg {
                         cell.set_fg(fg);
@@ -348,19 +523,43 @@ impl App {
                     }
                 }
             }
-            if sl.width >= sl.full as f32 * sl.cw - 0.01 {
-                painter.cells(&mut pix, &one, &self.look, px(sl.start), oy, sf);
+            let tx = sl.text_x();
+            // los fondos de los botones (el workspace activo): redondeados y de
+            // todo el alto de la caja, en vez del cuadro de cada celda
+            if let Some(br) = pill.button_radius
+                && sl.clip <= 0.01
+            {
+                let (top, bot) = (pill.margin[0] + pill.width, pill.margin[2] + pill.width);
+                let mut x = 0;
+                while x < sl.full {
+                    let bg = one[(x, 0)].bg;
+                    if bg == Color::Reset {
+                        x += 1;
+                        continue;
+                    }
+                    let start = x;
+                    while x < sl.full && one[(x, 0)].bg == bg {
+                        one[(x, 0)].set_bg(Color::Reset);
+                        x += 1;
+                    }
+                    let (bx0, bx1) = (px(tx + start as f32 * sl.cw), px(tx + x as f32 * sl.cw));
+                    rounded(&mut pix, bx0, px(top), bx1 - bx0, h as f32 - px(top) - px(bot), br * sf, bg, 1.0);
+                }
+            }
+            if sl.clip <= 0.01 && sl.width >= x1 - sl.start {
+                painter.cells(&mut pix, &one, look, px(tx), oy, sf);
                 continue;
             }
             let vis = (px(sl.start + sl.width) - px(sl.start)) as u32;
             let Some(mut part) = tiny_skia::Pixmap::new(vis.max(1), h as u32) else { continue };
-            painter.cells(&mut part, &one, &self.look, -px(sl.clip), oy, sf);
+            painter.cells(&mut part, &one, look, px(tx) - px(sl.start), oy, sf);
             pix.draw_pixmap(px(sl.start) as i32, 0, part.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
         }
 
-        let pool = match &mut self.pool {
+        let o = &mut self.outs[i];
+        let pool = match &mut o.pool {
             Some(p) => p,
-            None => self.pool.insert(SlotPool::new((w * h * 4) as usize, &self.shm).expect("memoria compartida")),
+            None => o.pool.insert(SlotPool::new((w * h * 4) as usize, &self.shm).expect("memoria compartida")),
         };
         let Ok((buffer, canvas)) = pool.create_buffer(w, h, w * 4, wl_shm::Format::Argb8888) else { return };
         // tiny-skia: RGBA premultiplicado; Wayland ARGB8888 en little endian: BGRA
@@ -370,60 +569,65 @@ impl App {
             dst[2] = src[0];
             dst[3] = src[3];
         }
-        // lo que dice el tooltip puede haber cambiado (el cpu, la hora…)
-        if self.tip.layer.is_some() {
-            self.tip_show();
-        }
         let surface = layer.wl_surface();
         surface.set_buffer_scale(s);
         surface.damage_buffer(0, 0, w, h);
-        if self.drawers_moving() && !self.frame_pending {
+        if self.drawers_moving(i) && !self.outs[i].frame_pending {
             surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-            self.frame_pending = true;
+            self.outs[i].frame_pending = true;
         }
         if buffer.attach_to(surface).is_ok() {
             layer.commit();
         }
+        // lo que dice el tooltip puede haber cambiado (el cpu, la hora…)
+        if self.tip.layer.is_some() && self.tip.out == i {
+            self.tip_show();
+        }
     }
 
-    /// Un clic o la rueda en x (pixeles): al módulo que esté ahí.
-    fn act(&mut self, act: Act) {
+    /// El lugar de la barra `i` en x (pixeles).
+    fn slot_at(&self, i: usize, x: f32) -> Option<usize> {
+        self.outs[i].slots.iter().position(|s| x >= s.start && x < s.start + s.width)
+    }
+
+    /// Un clic o la rueda en la barra `i`, en x (pixeles): al módulo que esté ahí.
+    fn act(&mut self, i: usize, act: Act) {
         let x = self.pointer_x as f32;
-        let Some(sl) = self.slots.iter().find(|s| x >= s.start && x < s.start + s.width) else { return };
-        let rel = ((x - sl.start + sl.clip) / sl.cw) as u16;
-        let rel = rel.saturating_sub(self.bar.pad);
-        let i = sl.module;
-        self.modules[i].1.act(act, rel);
+        let Some(k) = self.slot_at(i, x) else { return };
+        let sl = &self.outs[i].slots[k];
+        let rel = sl.col(x);
+        let m = sl.module;
+        let name = self.outs[i].name.clone();
+        self.modules[m].1.act_on(act, rel, &name);
         self.sync_idle();
         self.tip_reset(false);
         // lo que cambia solo con el clic (el reloj largo): de una vez
-        self.draw();
+        self.redraw_all();
     }
 
-    /// El mouse en x (pixeles; None: se fue de la barra): abrir el cajón que
-    /// tenga debajo y cerrar los demás.
-    fn hover(&mut self, x: Option<f64>) {
-        self.hover_x = x.map(|x| x as f32);
-        let now = self.under_mouse().map(|(sl, part)| (self.slots[sl].module, part.map(|p| p.0)));
-        if now != self.hovered {
-            self.hovered = now;
-            self.tip_reset(true);
-            if !self.drawers_moving() {
-                self.redraw();
+    /// El mouse en la barra `i`, en x (pixeles; None: se fue): abrir el cajón
+    /// que tenga debajo y cerrar los demás.
+    fn hover(&mut self, i: usize, x: Option<f64>) {
+        self.outs[i].hover_x = x.map(|x| x as f32);
+        let now = self.under_mouse(i).map(|(k, part)| (self.outs[i].slots[k].module, part.map(|p| p.0)));
+        if now != self.outs[i].hovered {
+            self.outs[i].hovered = now;
+            if now.is_some() || self.tip.out == i {
+                self.tip.out = i;
+                self.tip_reset(true);
+            }
+            if !self.drawers_moving(i) {
+                self.redraw(i);
             }
         }
-        let g = x.and_then(|x| {
-            let x = x as f32;
-            let sl = self.slots.iter().find(|s| x >= s.start && x < s.start + s.width)?;
-            self.member[sl.module].map(|m| m.0)
-        });
-        let was = self.drawers_moving();
-        for (i, d) in self.drawers.iter_mut().enumerate() {
-            d.open = g == Some(i);
+        let g = x.and_then(|x| self.slot_at(i, x as f32)).and_then(|k| self.member[self.outs[i].slots[k].module].map(|m| m.0));
+        let was = self.drawers_moving(i);
+        for (n, d) in self.outs[i].drawers.iter_mut().enumerate() {
+            d.open = g == Some(n);
         }
         // empezó a moverse: el primer cuadro ya, los demás con el compositor
-        if !was && self.drawers_moving() && !self.frame_pending {
-            self.frame();
+        if !was && self.drawers_moving(i) && !self.outs[i].frame_pending {
+            self.frame(i);
         }
     }
 
@@ -442,20 +646,20 @@ impl App {
             .collect();
     }
 
-    /// Lo que está bajo el mouse: (el lugar, y el botón de adentro si tiene).
-    fn under_mouse(&self) -> Option<(usize, Option<Part>)> {
-        let x = self.hover_x?;
-        let k = self.slots.iter().position(|s| x >= s.start && x < s.start + s.width)?;
-        let sl = &self.slots[k];
-        let col = ((x - sl.start + sl.clip) / sl.cw) as u16;
-        Some((k, self.modules[sl.module].1.part(col.saturating_sub(self.bar.pad))))
+    /// Lo que está bajo el mouse en la barra `i`: (el lugar, y el botón de
+    /// adentro si tiene).
+    fn under_mouse(&self, i: usize) -> Option<(usize, Option<Part>)> {
+        let o = &self.outs[i];
+        let x = o.hover_x?;
+        let k = self.slot_at(i, x)?;
+        let sl = &o.slots[k];
+        Some((k, self.modules[sl.module].1.part_on(sl.col(x), &o.name)))
     }
 
     /// Cómo se marca lo que está bajo el mouse (según `[bar.hover]`).
-    fn hover_style(&self) -> Option<Hover> {
-        let (k, part) = self.under_mouse()?;
-        let sl = &self.slots[k];
-        let pad = self.bar.pad;
+    fn hover_style(&self, i: usize) -> Option<Hover> {
+        let (k, part) = self.under_mouse(i)?;
+        let sl = &self.outs[i].slots[k];
         let c = |conf: &serde_json::Value, key: &str| conf[key].as_str().and_then(|v| fmt::color(&self.look, v));
         match part {
             Some((a, w, active)) => {
@@ -464,7 +668,7 @@ impl App {
                     return None;
                 }
                 let (fg, bg) = if active { ("active-fg", "active-bg") } else { ("fg", "bg") };
-                Some(Hover { slot: k, from: pad + a, to: pad + a + w, fg: c(h, fg), bg: c(h, bg) })
+                Some(Hover { slot: k, whole: false, from: a, to: a + w, fg: c(h, fg), bg: c(h, bg) })
             }
             None => {
                 let h = &self.bar.hover;
@@ -473,35 +677,36 @@ impl App {
                 if h.is_null() || !listed || name == "workspaces" {
                     return None;
                 }
-                Some(Hover { slot: k, from: 0, to: sl.full, fg: c(h, "fg"), bg: c(h, "bg") })
+                Some(Hover { slot: k, whole: true, from: 0, to: sl.full, fg: c(h, "fg"), bg: c(h, "bg") })
             }
         }
     }
 
-    /// ¿Algún cajón se está abriendo o cerrando? Esos van al ritmo de la
-    /// pantalla, con lo que avisa el compositor en cada cuadro.
-    fn drawers_moving(&self) -> bool {
-        !self.hidden && self.drawers.iter().any(Drawer::moving)
+    /// ¿Algún cajón de la barra `i` se está abriendo o cerrando? Esos van al
+    /// ritmo de la pantalla, con lo que avisa el compositor en cada cuadro.
+    fn drawers_moving(&self, i: usize) -> bool {
+        !self.hidden && self.outs.get(i).is_some_and(|o| o.drawers.iter().any(Drawer::moving))
     }
 
     /// ¿Algún módulo se mueve solo (el grabador pulsando)? Ese con reloj.
     fn pulsing(&self) -> bool {
-        !self.hidden && self.configured && self.modules.iter().any(|(_, m)| m.animating())
+        !self.hidden && self.outs.iter().any(|o| o.configured) && self.modules.iter().any(|(_, m)| m.animating())
     }
 
-    /// Un cuadro de los cajones: avanzar lo que pasó desde el anterior y
-    /// redibujar (draw pide el siguiente si siguen moviéndose).
-    fn frame(&mut self) {
+    /// Un cuadro de los cajones de la barra `i`: avanzar lo que pasó desde el
+    /// anterior y redibujar (draw pide el siguiente si siguen moviéndose).
+    fn frame(&mut self, i: usize) {
         let now = Instant::now();
-        let dt = self.last_frame.map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
-        self.last_frame = Some(now);
-        for d in &mut self.drawers {
+        let o = &mut self.outs[i];
+        let dt = o.last_frame.map_or(0.0, |t| now.duration_since(t).as_secs_f32().min(0.1));
+        o.last_frame = Some(now);
+        for d in &mut o.drawers {
             d.step(dt);
         }
-        if !self.drawers_moving() {
-            self.last_frame = None;
+        if !self.drawers_moving(i) {
+            self.outs[i].last_frame = None;
         }
-        self.redraw();
+        self.redraw(i);
     }
 
     fn on_ev(&mut self, ev: Ev) {
@@ -509,14 +714,9 @@ impl App {
             Ev::Toggle => {
                 self.hidden = !self.hidden;
                 if self.hidden {
-                    if let Some(i) = self.inhibitor.take() {
-                        i.destroy();
-                    }
-                    self.layer = None;
-                    self.pool = None;
-                    self.tip_hide();
+                    self.drop_outs();
                 } else {
-                    self.create_layer();
+                    self.make_outs();
                 }
                 return;
             }
@@ -532,7 +732,7 @@ impl App {
             dirty |= m.update(&ev);
         }
         if dirty {
-            self.redraw();
+            self.redraw_all();
         }
     }
 
@@ -541,23 +741,21 @@ impl App {
         if new_bar {
             self.bar = bar::load();
             self.painter = Painter::sized(self.bar.font_size);
-            let b = build(&self.bar, &Ctx { idle: self.idle.clone() });
-            (self.modules, self.member, self.drawers, self.names) = (b.modules, b.member, b.drawers, b.names);
+            let b = build(&self.bar, &Ctx { idle: self.idle.clone(), tx: self.tx.clone() });
+            (self.modules, self.member, self.drawers, self.names, self.pills) = (b.modules, b.member, b.drawers, b.names, b.pills);
+            self.barbox = style::BarBox::new(&self.bar.boxed, self.bar.style == Style::Solid, self.bar.radius);
+            self.sections = sections(&self.bar);
             self.painters.clear();
             self.make_painters(&b.sizes);
-            self.hovered = None;
-            if self.hidden {
-                return;
+            if !self.hidden {
+                self.make_outs();
             }
-            self.layer = None;
-            self.pool = None;
-            self.create_layer();
         } else {
             self.painter = Painter::sized(self.bar.font_size);
             for (sz, p) in &mut self.painters {
                 *p = Painter::sized(Some(*sz));
             }
-            self.redraw();
+            self.redraw_all();
         }
     }
 }
@@ -595,13 +793,14 @@ fn run() -> Result<(), String> {
     modules::audio::watch(tx.clone());
     modules::bluetooth::watch(tx.clone());
     modules::notifications::watch(tx.clone());
-    signals::watch(tx);
+    modules::visualizer::watch(tx.clone());
+    signals::watch(tx.clone());
     // los nombres de días y meses del reloj, en el idioma del sistema
     unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
 
     let bar = bar::load();
     let idle = Rc::new(Cell::new(false));
-    let ctx = Ctx { idle: idle.clone() };
+    let ctx = Ctx { idle: idle.clone(), tx: tx.clone() };
     let built = build(&bar, &ctx);
     let built_sizes = built.sizes.clone();
     let mut app = App {
@@ -611,11 +810,7 @@ fn run() -> Result<(), String> {
         compositor: CompositorState::bind(&globals, &qh).map_err(|_| "el compositor no tiene wl_compositor")?,
         layer_shell: LayerShell::bind(&globals, &qh).map_err(|_| "el compositor no tiene layer-shell")?,
         shm: Shm::bind(&globals, &qh).map_err(|_| "el compositor no tiene wl_shm")?,
-        pool: None,
-        layer: None,
-        configured: false,
-        size: (0, 0),
-        scale: 1,
+        outs: Vec::new(),
         pointer: None,
         pointer_x: 0.0,
         scroll: 0.0,
@@ -627,22 +822,23 @@ fn run() -> Result<(), String> {
         member: built.member,
         drawers: built.drawers,
         names: built.names,
-        hover_x: None,
-        hovered: None,
+        pills: built.pills,
+        barbox: style::BarBox::default(),
+        sections: [None, None, None],
         tip: tooltip::Tip::default(),
-        last_frame: None,
-        frame_pending: false,
         last_pulse: Instant::now(),
         bar,
-        slots: Vec::new(),
         idle,
+        tx,
         hidden: false,
         idle_mgr: globals.bind::<ZwpIdleInhibitManagerV1, _, _>(&qh, 1..=1, ()).ok(),
         inhibitor: None,
         qh,
     };
     app.make_painters(&built_sizes);
-    app.create_layer();
+    app.barbox = style::BarBox::new(&app.bar.boxed, app.bar.style == Style::Solid, app.bar.radius);
+    app.sections = sections(&app.bar);
+    // las barras salen con cada monitor (new_output)
 
     let mut last_sec = 0;
     let mut bar_stamp = bar::stamp();
@@ -666,8 +862,10 @@ fn run() -> Result<(), String> {
         // el pulso del grabador (si los cajones se mueven, ya se redibuja con ellos)
         if app.pulsing() && app.last_pulse.elapsed() >= PULSE {
             app.last_pulse = Instant::now();
-            if !app.frame_pending {
-                app.redraw();
+            for i in 0..app.outs.len() {
+                if !app.outs[i].frame_pending {
+                    app.redraw(i);
+                }
             }
         }
         let sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -693,18 +891,21 @@ fn run() -> Result<(), String> {
 }
 
 impl CompositorHandler for App {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, factor: i32) {
-        if factor != self.scale {
-            self.scale = factor;
-            self.pool = None;
-            self.redraw();
+    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, factor: i32) {
+        if let Some(i) = self.out_of(surface)
+            && factor != self.outs[i].scale
+        {
+            self.outs[i].scale = factor;
+            self.outs[i].pool = None;
+            self.redraw(i);
         }
     }
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.frame_pending = false;
-        if self.drawers_moving() {
-            self.frame();
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
+        let Some(i) = self.out_of(surface) else { return };
+        self.outs[i].frame_pending = false;
+        if self.drawers_moving(i) {
+            self.frame(i);
         }
     }
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
@@ -715,9 +916,30 @@ impl OutputHandler for App {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output
     }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.add_out(output);
+    }
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        // otro nombre (o llegó tarde): ponerlo al día
+        let name = self.output.info(&output).and_then(|i| i.name).unwrap_or_default();
+        if let Some(o) = self.outs.iter_mut().find(|o| o.output == output) {
+            o.name = name;
+        }
+    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        let Some(i) = self.outs.iter().position(|o| o.output == output) else { return };
+        if self.tip.out == i {
+            self.tip_hide();
+        }
+        if i == 0
+            && let Some(inh) = self.inhibitor.take()
+        {
+            inh.destroy();
+        }
+        self.outs.remove(i);
+        self.tip.out = 0;
+        self.sync_idle();
+    }
 }
 
 impl LayerShellHandler for App {
@@ -726,8 +948,7 @@ impl LayerShellHandler for App {
             self.tip_hide();
             return;
         }
-        self.layer = None;
-        self.configured = false;
+        self.outs.retain(|o| &o.layer != layer);
     }
 
     fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, cfg: LayerSurfaceConfigure, _: u32) {
@@ -735,17 +956,16 @@ impl LayerShellHandler for App {
             self.tip_configure(cfg.new_size);
             return;
         }
-        if self.layer.as_ref() != Some(layer) {
-            return;
-        }
+        let Some(i) = self.outs.iter().position(|o| &o.layer == layer) else { return };
+        let o = &mut self.outs[i];
         if cfg.new_size.0 > 0 && cfg.new_size.1 > 0 {
-            if cfg.new_size != self.size {
-                self.pool = None;
+            if cfg.new_size != o.size {
+                o.pool = None;
             }
-            self.size = cfg.new_size;
+            o.size = cfg.new_size;
         }
-        self.configured = true;
-        self.draw();
+        o.configured = true;
+        self.draw(i);
     }
 }
 
@@ -771,16 +991,14 @@ impl SeatHandler for App {
 impl PointerHandler for App {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         for e in events {
-            if self.layer.as_ref().is_none_or(|l| &e.surface != l.wl_surface()) {
-                continue;
-            }
+            let Some(i) = self.out_of(&e.surface) else { continue };
             self.pointer_x = e.position.0;
             match e.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => self.hover(Some(e.position.0)),
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => self.hover(i, Some(e.position.0)),
                 PointerEventKind::Press { button, .. } => match button {
-                    BTN_LEFT => self.act(Act::Left),
-                    BTN_RIGHT => self.act(Act::Right),
-                    BTN_MIDDLE => self.act(Act::Middle),
+                    BTN_LEFT => self.act(i, Act::Left),
+                    BTN_RIGHT => self.act(i, Act::Right),
+                    BTN_MIDDLE => self.act(i, Act::Middle),
                     _ => {}
                 },
                 PointerEventKind::Axis { vertical, .. } => {
@@ -790,12 +1008,12 @@ impl PointerHandler for App {
                     while self.scroll.abs() >= 15.0 {
                         let down = self.scroll > 0.0;
                         self.scroll -= 15.0f64.copysign(self.scroll);
-                        self.act(if down { Act::Down } else { Act::Up });
+                        self.act(i, if down { Act::Down } else { Act::Up });
                     }
                 }
                 PointerEventKind::Leave { .. } => {
                     self.scroll = 0.0;
-                    self.hover(None);
+                    self.hover(i, None);
                 }
                 _ => {}
             }

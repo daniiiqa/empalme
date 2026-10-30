@@ -29,6 +29,8 @@ pub struct Bar {
     pub pad: u16,
     /// celdas entre módulos
     pub gap: u16,
+    /// pixeles entre módulos (el `spacing` de waybar); manda sobre `gap`
+    pub spacing: Option<f32>,
     pub left: Vec<String>,
     pub center: Vec<String>,
     pub right: Vec<String>,
@@ -44,6 +46,11 @@ pub struct Bar {
     pub hover_ws: Value,
     /// `[bar.tooltip]`: fg, bg, border (colores), radius
     pub tooltip: Value,
+    /// `[bar.box]` y `[bar.pill]`: cómo se ve la barra y cada módulo (style.rs)
+    pub boxed: Value,
+    pub pill: Value,
+    /// `[bar.sections.left|center|right]`: la caja de cada sección
+    pub sections: Value,
 }
 
 impl Default for Bar {
@@ -57,6 +64,7 @@ impl Default for Bar {
             font_size: None,
             pad: 1,
             gap: 1,
+            spacing: None,
             left: vec!["workspaces".into()],
             center: vec!["clock".into()],
             right: ["temperature", "cpu", "memory", "disk", "audio", "mic", "network", "bluetooth", "battery", "power"]
@@ -67,6 +75,9 @@ impl Default for Bar {
             hover: Value::Null,
             hover_ws: Value::Null,
             tooltip: Value::Null,
+            boxed: Value::Null,
+            pill: Value::Null,
+            sections: Value::Null,
         }
     }
 }
@@ -108,6 +119,7 @@ pub fn load() -> Bar {
     if let Some(p) = v["pad"].as_u64() {
         b.pad = p as u16;
     }
+    b.spacing = v["spacing"].as_f64().map(|s| s as f32);
     if let Some(g) = v["gap"].as_u64() {
         b.gap = g as u16;
     }
@@ -119,5 +131,8 @@ pub fn load() -> Bar {
     b.hover = v["hover"].clone();
     b.hover_ws = v["hover-workspaces"].clone();
     b.tooltip = v["tooltip"].clone();
+    b.boxed = v["box"].clone();
+    b.pill = v["pill"].clone();
+    b.sections = v["sections"].clone();
     b
 }

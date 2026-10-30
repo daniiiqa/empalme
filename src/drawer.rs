@@ -3,6 +3,7 @@
 //! deslizándose en `transition-duration` milisegundos; con
 //! `transition-left-to-right = false` salen hacia la izquierda.
 
+#[derive(Clone)]
 pub struct Drawer {
     /// los demás salen a la derecha del primero
     pub right: bool,
