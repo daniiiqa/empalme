@@ -105,6 +105,17 @@ pub trait Module {
         None
     }
     /// ¿Se está moviendo (el grabador pulsando)? La barra lo redibuja seguido.
+    /// Su estado como la clase de CSS de waybar (`recording`), para lo que
+    /// el look cambia en él (`recording-text-shadow`).
+    fn class(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Su opacidad (el `opacity` del CSS): también apaga su brillo.
+    fn opacity(&self) -> f32 {
+        1.0
+    }
+
     fn animating(&self) -> bool {
         false
     }

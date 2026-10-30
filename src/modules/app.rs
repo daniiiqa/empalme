@@ -65,6 +65,10 @@ impl Module for App {
         show(look, &text, &[], Style::new().fg(fg))
     }
 
+    fn opacity(&self) -> f32 {
+        if self.now.closed { 0.45 } else { 1.0 }
+    }
+
     fn tooltip(&self, _: &Look) -> Option<String> {
         (self.conf.0["tooltip"].as_bool() != Some(false)).then(|| self.now.tooltip.clone())
     }

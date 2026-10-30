@@ -10,6 +10,7 @@
 mod bar;
 mod drawer;
 mod fmt;
+mod glow;
 mod hypr;
 mod modules;
 mod signals;
@@ -132,9 +133,29 @@ fn sized_runs(line: &ratatui::text::Line, base: f32) -> Vec<(u16, u16, Option<f3
 
 /// Pinta un renglón de celdas por tramos, cada uno con su painter, en la
 /// línea base del painter del módulo (`base`; None: `main`), o arriba (como
-/// `<sup>`) o abajo; desde `x` (pixeles del monitor) y centrado en `h`.
+/// `<sup>`) o abajo; desde `x` (pixeles del monitor) y centrado en `h`. Con
+/// `glow`, su brillo debajo (el text-shadow).
 #[allow(clippy::too_many_arguments)]
-fn paint_runs(main: &mut Painter, list: &mut [(f32, Painter)], base: Option<usize>, runs: &[Run], buf: &Buffer, pix: &mut tiny_skia::Pixmap, look: &Look, x: f32, h: f32, sf: f32) {
+fn paint_runs(main: &mut Painter, list: &mut [(f32, Painter)], base: Option<usize>, runs: &[Run], buf: &Buffer, pix: &mut tiny_skia::Pixmap, look: &Look, x: f32, h: f32, sf: f32, glow: &[glow::Shadow], opacity: f32) {
+    if !glow.is_empty() {
+        let bcw = base.map_or(main.cw, |j| list[j].1.cw);
+        let w: f32 = if runs.is_empty() {
+            buf.area.width as f32 * bcw
+        } else {
+            runs.iter().map(|r| r.to.saturating_sub(r.from) as f32 * r.painter.map_or(bcw, |j| list[j].1.cw)).sum()
+        };
+        let m = glow::reach(glow, sf);
+        // el texto aparte, en blanco y sin fondos: cuánto cubre cada pixel
+        if let Some(mut cover) = tiny_skia::Pixmap::new((w * sf + 2.0 * m).ceil() as u32, h as u32) {
+            let mut white = buf.clone();
+            for c in &mut white.content {
+                c.set_fg(Color::Rgb(255, 255, 255));
+                c.set_bg(Color::Reset);
+            }
+            paint_runs(main, list, base, runs, &white, &mut cover, look, m, h, sf, &[], 1.0);
+            glow::paint(pix, &cover, glow, look, x - m, sf, opacity);
+        }
+    }
     let bch = base.map_or(main.ch, |j| list[j].1.ch) * sf;
     let oy = ((h - bch) / 2.0).floor();
     if let [Run { painter: None, rise: 0, .. }] | [] = runs {
@@ -613,6 +634,10 @@ impl App {
             }
         }
 
+        // el brillo de lo que está bajo el mouse, si el look lo cambia
+        let hglow = self.bar.hover["text-shadow"].as_str().map(glow::parse);
+        let hwsglow = self.bar.hover_ws["text-shadow"].as_str().map(glow::parse);
+
         // el texto, centrado de alto en la barra; a medio abrir, en su propio
         // cuadro y solo lo que se ve
         for (k, sl) in self.outs[i].slots.iter().enumerate() {
@@ -669,11 +694,17 @@ impl App {
                     }
                     let (br, bw) = &bruns[sl.module][n];
                     let pad = (bx1 - bx0 - bw) / 2.0;
-                    paint_runs(&mut self.painter, &mut self.painters, base, br, &one, &mut pix, look, px(bx0 + pad), h as f32, sf);
+                    let hovered = matches!(hov, Some(Hover { slot, px: Some(_), .. }) if slot == k) && o.hovered.and_then(|h| h.1) == Some(n as u16);
+                    let g = hwsglow.as_deref().filter(|_| hovered).unwrap_or(pill.glow(on.then_some("active")));
+                    paint_runs(&mut self.painter, &mut self.painters, base, br, &one, &mut pix, look, px(bx0 + pad), h as f32, sf, g, 1.0);
                 }
                 continue;
             }
             let Some(line) = &lines[sl.module].1 else { continue };
+            let class = if matches!(active[k], Some((_, None))) { Some("active") } else { self.modules[sl.module].1.class() };
+            let hovered = matches!(hov, Some(Hover { slot, whole: true, .. }) if slot == k);
+            let g = hglow.as_deref().filter(|_| hovered).unwrap_or(pill.glow(class));
+            let op = self.modules[sl.module].1.opacity();
             let mut one = Buffer::empty(Rect::new(0, 0, sl.full.max(1), 1));
             one.set_line(0, 0, line, sl.full);
             // el color y el grueso de las letras del módulo, si el look los cambia
@@ -734,12 +765,12 @@ impl App {
                 }
             }
             if sl.clip <= 0.01 && sl.width >= x1 - sl.start {
-                paint_runs(&mut self.painter, &mut self.painters, base, &runs[sl.module], &one, &mut pix, look, px(tx), h as f32, sf);
+                paint_runs(&mut self.painter, &mut self.painters, base, &runs[sl.module], &one, &mut pix, look, px(tx), h as f32, sf, g, op);
                 continue;
             }
             let vis = (px(sl.start + sl.width) - px(sl.start)) as u32;
             let Some(mut part) = tiny_skia::Pixmap::new(vis.max(1), h as u32) else { continue };
-            paint_runs(&mut self.painter, &mut self.painters, base, &runs[sl.module], &one, &mut part, look, px(tx) - px(sl.start), h as f32, sf);
+            paint_runs(&mut self.painter, &mut self.painters, base, &runs[sl.module], &one, &mut part, look, px(tx) - px(sl.start), h as f32, sf, g, op);
             pix.draw_pixmap(px(sl.start) as i32, 0, part.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
         }
 

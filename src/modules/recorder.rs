@@ -130,6 +130,15 @@ impl Module for Recorder {
         self.now.rec.is_some() && !self.now.paused
     }
 
+    fn class(&self) -> Option<&'static str> {
+        let n = &self.now;
+        if n.rec.is_some() {
+            Some(if n.paused { "paused" } else { "recording" })
+        } else {
+            n.replay.then_some("replay")
+        }
+    }
+
     fn update(&mut self, ev: &Ev) -> bool {
         if !matches!(ev, Ev::Tick | Ev::Signal(10)) {
             return false;

@@ -6,13 +6,16 @@
 //!   [bar.pill]  cada módulo (la regla común de sus #clock, #network…): fg,
 //!               bg, border, border-width, radius, margin [arriba, derecha,
 //!               abajo, izquierda], padding (a los lados), shadow [x, y,
-//!               color], bold, button-radius (los fondos de sus botones)
+//!               color], bold, button-radius (los fondos de sus botones),
+//!               text-shadow (como en CSS; `<clase>-text-shadow` para un
+//!               estado: active, recording…; ver glow.rs)
 //!   [bar.modules.<nombre>] lo mismo, solo para ese módulo (encima de pill)
 //! Los colores como en los formatos (`color12`, `acc`, `alpha(bg0, 0.9)`),
 //! pixeles lógicos. Sin [bar.box] ni [bar.pill], `style = "solid"` es la
 //! barra del color de fondo del look e `"islands"` una isla por módulo.
 
 use crate::fmt;
+use crate::glow::{self, Shadow};
 use disco::look::Look;
 use disco::paint::{rounded, stroke_rounded};
 use ratatui::style::Color;
@@ -165,6 +168,8 @@ pub struct Pill {
     pub active_bg: Option<String>,
     /// el color de sus letras cuando está activo
     pub active_fg: Option<String>,
+    /// el brillo de sus letras (text-shadow), por estado ("" el de siempre)
+    pub glow: Vec<(String, Vec<Shadow>)>,
 }
 
 impl Pill {
@@ -243,7 +248,19 @@ impl Pill {
         if let Some(c) = s(v, "active-fg") {
             p.active_fg = Some(c);
         }
+        for (k, x) in v.as_object().into_iter().flatten() {
+            let Some(class) = k.strip_suffix("text-shadow").map(|c| c.trim_end_matches('-')) else { continue };
+            let Some(x) = x.as_str() else { continue };
+            p.glow.retain(|(c, _)| c != class);
+            p.glow.push((class.to_string(), glow::parse(x)));
+        }
         p
+    }
+
+    /// El brillo de sus letras en el estado `class` (o el de siempre).
+    pub fn glow(&self, class: Option<&str>) -> &[Shadow] {
+        let find = |c: &str| self.glow.iter().find(|(k, _)| k == c).map(|(_, g)| g.as_slice());
+        class.and_then(find).or_else(|| find("")).unwrap_or(&[])
     }
 
     /// El color de las letras, si el look lo cambia para este módulo.
