@@ -72,8 +72,9 @@ struct Slot {
     /// sus botones (los workspaces): de dónde a dónde, en pixeles desde su
     /// texto, y si es el activo
     buttons: Vec<(f32, f32, bool)>,
-    /// el ancho de una celda de este módulo (su tamaño de letra)
-    cw: f32,
+    /// dónde empieza cada celda de su texto (y dónde acaba la última), en
+    /// pixeles desde su texto: cada tramo con su tamaño de letra
+    edges: Vec<f32>,
     /// pixeles: margen izquierdo y relleno a cada lado del texto (el margen
     /// derecho ya va en el ancho)
     ml: f32,
@@ -88,7 +89,82 @@ impl Slot {
 
     /// La celda de su texto en x (pixeles); 0 si cae en el relleno izquierdo.
     fn col(&self, x: f32) -> u16 {
-        ((x - self.text_x()) / self.cw).max(0.0) as u16
+        let x = x - self.text_x();
+        self.edges.iter().rposition(|e| *e <= x).unwrap_or(0) as u16
+    }
+
+    /// Dónde empieza la celda `c` (pixeles desde su texto).
+    fn cell_x(&self, c: u16) -> f32 {
+        self.edges.get(c as usize).or(self.edges.last()).copied().unwrap_or(0.0)
+    }
+}
+
+/// Un tramo de un renglón con su tamaño de letra (fmt::Size): de qué celda a
+/// qué celda, con qué painter (None: el del módulo) y si va arriba o abajo.
+#[derive(Clone, Copy)]
+struct Run {
+    from: u16,
+    to: u16,
+    painter: Option<usize>,
+    rise: u8,
+}
+
+/// Los tramos de `line` con letra de `base` pixeles: (de, hasta, pixeles si
+/// es otro tamaño, arriba/abajo).
+fn sized_runs(line: &ratatui::text::Line, base: f32) -> Vec<(u16, u16, Option<f32>, u8)> {
+    let mut out: Vec<(u16, u16, Option<f32>, u8)> = Vec::new();
+    let mut x = 0u16;
+    for sp in &line.spans {
+        let w = sp.width() as u16;
+        if w == 0 {
+            continue;
+        }
+        let sz = fmt::Size::of(sp.style.underline_color.unwrap_or(Color::Reset));
+        let (px, rise) = (sz.px(base), sz.rise);
+        match out.last_mut() {
+            Some(r) if r.2 == px && r.3 == rise => r.1 = x + w,
+            _ => out.push((x, x + w, px, rise)),
+        }
+        x += w;
+    }
+    out
+}
+
+/// Pinta un renglón de celdas por tramos, cada uno con su painter, en la
+/// línea base del painter del módulo (`base`; None: `main`), o arriba (como
+/// `<sup>`) o abajo; desde `x` (pixeles del monitor) y centrado en `h`.
+#[allow(clippy::too_many_arguments)]
+fn paint_runs(main: &mut Painter, list: &mut [(f32, Painter)], base: Option<usize>, runs: &[Run], buf: &Buffer, pix: &mut tiny_skia::Pixmap, look: &Look, x: f32, h: f32, sf: f32) {
+    let bch = base.map_or(main.ch, |j| list[j].1.ch) * sf;
+    let oy = ((h - bch) / 2.0).floor();
+    if let [Run { painter: None, rise: 0, .. }] | [] = runs {
+        let p = match base {
+            Some(j) => &mut list[j].1,
+            None => main,
+        };
+        p.cells(pix, buf, look, x, oy, sf);
+        return;
+    }
+    let mut x = x;
+    for r in runs {
+        let p = match r.painter.or(base) {
+            Some(j) => &mut list[j].1,
+            None => &mut *main,
+        };
+        let w = r.to.saturating_sub(r.from);
+        let mut one = Buffer::empty(Rect::new(0, 0, w.max(1), 1));
+        for k in 0..w {
+            one[(k, 0)] = buf[(r.from + k, 0)].clone();
+        }
+        let ch = p.ch * sf;
+        // la línea base cae a ~3/4 del alto de la celda en las dos letras
+        let y = match r.rise {
+            1 => oy - 0.1 * bch,
+            2 => oy + bch - ch,
+            _ => oy + 0.75 * (bch - ch),
+        };
+        p.cells(pix, &one, look, x.round(), y.round(), sf);
+        x += w as f32 * p.cw * sf;
     }
 }
 
@@ -351,30 +427,72 @@ impl App {
         let Some(mut pix) = tiny_skia::Pixmap::new(w as u32, h as u32) else { return };
         let cw = self.painter.cw;
         let gap = self.bar.spacing.unwrap_or(self.bar.gap as f32 * cw);
-        let look = &self.look;
-        let t = look.theme;
 
         // qué muestra cada módulo en este monitor y cuánto mide (su texto, su
         // relleno y sus márgenes, en pixeles)
-        let lines: Vec<_> = self.modules.iter().map(|(sect, m)| (*sect, m.line_on(look, &o.name))).collect();
-        let full: Vec<Option<u16>> = lines.iter().map(|(_, l)| l.as_ref().map(|l| l.width() as u16)).collect();
-        let cws: Vec<f32> = self.painter_of.iter().map(|p| p.map_or(cw, |j| self.painters[j].1.cw)).collect();
-        let padx: Vec<f32> = self.pills.iter().zip(&cws).map(|(p, cw)| p.padding.unwrap_or(self.bar.pad as f32 * cw)).collect();
+        let name = o.name.clone();
+        let lines: Vec<_> = self.modules.iter().map(|(sect, m)| (*sect, m.line_on(&self.look, &name))).collect();
         // los módulos con botones (los workspaces), si el look les da relleno en pixeles
         let btns: Vec<Option<Vec<(ratatui::text::Line<'static>, bool)>>> = self
             .modules
             .iter()
             .zip(&self.pills)
-            .map(|((_, m), p)| p.button_padding.and_then(|_| m.buttons(look, &o.name)))
+            .map(|((_, m), p)| p.button_padding.and_then(|_| m.buttons(&self.look, &name)))
             .collect();
+        // los tramos de letra de otro tamaño (fmt::Size), cada uno con su painter
+        let base_px: Vec<f32> = self.painter_of.iter().map(|p| p.map_or(self.painter.px, |j| self.painters[j].1.px)).collect();
+        let raw_runs = |i: usize, l: &ratatui::text::Line| sized_runs(l, base_px[i]);
+        let mut wanted: Vec<f32> = Vec::new();
+        for i in 0..lines.len() {
+            let ls = lines[i].1.iter().chain(btns[i].iter().flatten().map(|(l, _)| l));
+            wanted.extend(ls.flat_map(|l| raw_runs(i, l)).filter_map(|r| r.2));
+        }
+        for px in wanted {
+            self.painter_px(px);
+        }
+        let resolve = |i: usize, l: &ratatui::text::Line| -> Vec<Run> {
+            raw_runs(i, l)
+                .into_iter()
+                .map(|(from, to, px, rise)| Run { from, to, painter: px.and_then(|px| self.painters.iter().position(|(p, _)| *p == px)), rise })
+                .collect()
+        };
+        let o = &self.outs[i];
+        let look = &self.look;
+        let t = look.theme;
+        let full: Vec<Option<u16>> = lines.iter().map(|(_, l)| l.as_ref().map(|l| l.width() as u16)).collect();
+        let cws: Vec<f32> = self.painter_of.iter().map(|p| p.map_or(cw, |j| self.painters[j].1.cw)).collect();
+        let cw_of = |i: usize, r: &Run| r.painter.map_or(cws[i], |j| self.painters[j].1.cw);
+        // dónde empieza cada celda, en pixeles desde el texto
+        let edges_of = |i: usize, runs: &[Run]| -> Vec<f32> {
+            let mut e = vec![0.0];
+            for r in runs {
+                for _ in r.from..r.to {
+                    e.push(e.last().unwrap() + cw_of(i, r));
+                }
+            }
+            e
+        };
+        let runs: Vec<Vec<Run>> = (0..lines.len()).map(|i| lines[i].1.as_ref().map_or(Vec::new(), |l| resolve(i, l))).collect();
+        let edges: Vec<Vec<f32>> = (0..lines.len()).map(|i| edges_of(i, &runs[i])).collect();
+        // con botones: los tramos de cada uno y su ancho de texto
+        let bruns: Vec<Vec<(Vec<Run>, f32)>> = (0..lines.len())
+            .map(|i| {
+                btns[i].iter().flatten().map(|(l, _)| {
+                    let r = resolve(i, l);
+                    let w = *edges_of(i, &r).last().unwrap();
+                    (r, w)
+                }).collect()
+            })
+            .collect();
+        let padx: Vec<f32> = self.pills.iter().zip(&cws).map(|(p, cw)| p.padding.unwrap_or(self.bar.pad as f32 * cw)).collect();
         let bpad = |i: usize, on: bool| {
             let p = &self.pills[i];
             if on { p.active_padding.or(p.button_padding).unwrap_or(0.0) } else { p.button_padding.unwrap_or(0.0) }
         };
         let tw: Vec<f32> = (0..full.len())
             .map(|i| match &btns[i] {
-                Some(b) => b.iter().map(|(l, on)| l.width() as f32 * cws[i] + 2.0 * bpad(i, *on)).sum(),
-                None => full[i].unwrap_or(0) as f32 * cws[i],
+                Some(b) => b.iter().zip(&bruns[i]).map(|((_, on), (_, w))| w + 2.0 * bpad(i, *on)).sum(),
+                None => *edges[i].last().unwrap(),
             })
             .collect();
         let outer = |i: usize| full[i].map_or(0.0, |_| tw[i] + 2.0 * padx[i] + self.pills[i].margin[1] + self.pills[i].margin[3]);
@@ -411,13 +529,13 @@ impl App {
                 let mut buttons = Vec::new();
                 if let Some(b) = &btns[i] {
                     let mut bx = 0.0;
-                    for (l, on) in b {
-                        let bw = l.width() as f32 * cws[i] + 2.0 * bpad(i, *on);
+                    for ((_, on), (_, w)) in b.iter().zip(&bruns[i]) {
+                        let bw = w + 2.0 * bpad(i, *on);
                         buttons.push((bx, bx + bw, *on));
                         bx += bw;
                     }
                 }
-                slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap(), tw: tw[i], buttons, cw: cws[i], ml: p.margin[3], padx: padx[i] });
+                slots.push(Slot { module: i, start: x, width, clip, full: full[i].unwrap(), tw: tw[i], buttons, edges: edges[i].clone(), ml: p.margin[3], padx: padx[i] });
                 x += width + gap;
             }
         }
@@ -487,7 +605,7 @@ impl App {
             let (x0, x1, top, bot, r) = match bpx {
                 // un botón: redondeado como el activo, del alto de la caja
                 Some((a, b)) => (a, b, p.margin[0] + p.width, p.margin[2] + p.width, p.button_radius.unwrap_or(self.bar.radius)),
-                None => (sl.text_x() + from as f32 * sl.cw, sl.text_x() + to as f32 * sl.cw, 0.0, 0.0, self.bar.radius),
+                None => (sl.text_x() + sl.cell_x(from), sl.text_x() + sl.cell_x(to), 0.0, 0.0, self.bar.radius),
             };
             let (x0, x1) = (x0.max(sl.start), x1.min(sl.start + sl.width));
             if x1 > x0 {
@@ -498,11 +616,7 @@ impl App {
         // el texto, centrado de alto en la barra; a medio abrir, en su propio
         // cuadro y solo lo que se ve
         for (k, sl) in self.outs[i].slots.iter().enumerate() {
-            let painter = match self.painter_of[sl.module] {
-                Some(j) => &mut self.painters[j].1,
-                None => &mut self.painter,
-            };
-            let oy = ((h as f32 - painter.ch * sf) / 2.0).floor();
+            let base = self.painter_of[sl.module];
             let (x0, x1) = boxes[k];
             // la línea de lo activo: 2 pixeles abajo (o arriba), de todo el
             // módulo o de su botón activo, como el border del CSS
@@ -511,7 +625,7 @@ impl App {
                 let c = pill.active_color.as_deref().and_then(|v| fmt::color(look, v)).unwrap_or(c);
                 match (part, sl.buttons.iter().find(|b| b.2)) {
                     (Some(_), Some(&(a, b, _))) => (c, sl.text_x() + a, sl.text_x() + b),
-                    (Some((a, w, _)), None) => (c, sl.text_x() + a as f32 * sl.cw, sl.text_x() + (a + w) as f32 * sl.cw),
+                    (Some((a, w, _)), None) => (c, sl.text_x() + sl.cell_x(a), sl.text_x() + sl.cell_x(a + w)),
                     (None, _) => (c, x0, x1),
                 }
             });
@@ -553,8 +667,9 @@ impl App {
                             one[(x, 0)].modifier.insert(ratatui::style::Modifier::BOLD);
                         }
                     }
-                    let pad = (bx1 - bx0 - w as f32 * sl.cw) / 2.0;
-                    painter.cells(&mut pix, &one, look, px(bx0 + pad), oy, sf);
+                    let (br, bw) = &bruns[sl.module][n];
+                    let pad = (bx1 - bx0 - bw) / 2.0;
+                    paint_runs(&mut self.painter, &mut self.painters, base, br, &one, &mut pix, look, px(bx0 + pad), h as f32, sf);
                 }
                 continue;
             }
@@ -614,17 +729,17 @@ impl App {
                         one[(x, 0)].set_bg(Color::Reset);
                         x += 1;
                     }
-                    let (bx0, bx1) = (px(tx + start as f32 * sl.cw), px(tx + x as f32 * sl.cw));
+                    let (bx0, bx1) = (px(tx + sl.cell_x(start)), px(tx + sl.cell_x(x)));
                     rounded(&mut pix, bx0, px(top), bx1 - bx0, h as f32 - px(top) - px(bot), br * sf, bg, 1.0);
                 }
             }
             if sl.clip <= 0.01 && sl.width >= x1 - sl.start {
-                painter.cells(&mut pix, &one, look, px(tx), oy, sf);
+                paint_runs(&mut self.painter, &mut self.painters, base, &runs[sl.module], &one, &mut pix, look, px(tx), h as f32, sf);
                 continue;
             }
             let vis = (px(sl.start + sl.width) - px(sl.start)) as u32;
             let Some(mut part) = tiny_skia::Pixmap::new(vis.max(1), h as u32) else { continue };
-            painter.cells(&mut part, &one, look, px(tx) - px(sl.start), oy, sf);
+            paint_runs(&mut self.painter, &mut self.painters, base, &runs[sl.module], &one, &mut part, look, px(tx) - px(sl.start), h as f32, sf);
             pix.draw_pixmap(px(sl.start) as i32, 0, part.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
         }
 
@@ -707,6 +822,15 @@ impl App {
         if !was && self.drawers_moving(i) && !self.outs[i].frame_pending {
             self.frame(i);
         }
+    }
+
+    /// El painter de letra de `px` pixeles (los tramos de otro tamaño, como
+    /// el `size="small"` de pango): uno por tamaño, hecho la primera vez.
+    fn painter_px(&mut self, px: f32) -> usize {
+        self.painters.iter().position(|(p, _)| *p == px).unwrap_or_else(|| {
+            self.painters.push((px, Painter::sized(Some(px))));
+            self.painters.len() - 1
+        })
     }
 
     /// Un painter por cada tamaño de letra propio que pidan los módulos.

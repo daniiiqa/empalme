@@ -4,7 +4,8 @@
 //! Además de colores `#rrggbb`, el marcado entiende los del look: primary,
 //! accent, fg, muted, red, green, y los de `~/.config/empalme/colors.json`
 //! (que escribe LookBuild.py: color0…color15 y los nombres propios del look,
-//! como rec o critical).
+//! como rec o critical). Y los tamaños de pango (`size="small"`, `font='12'`,
+//! `<small>`, `<sup>`): ver `Size`.
 
 use discada_kit::look::Look;
 use ratatui::style::{Color, Modifier, Style};
@@ -267,21 +268,107 @@ pub fn plain(markup: &str) -> String {
     unescape(&out)
 }
 
+/// El tamaño de un pedazo del marcado. Va escondido en el color de
+/// subrayado de sus celdas (la barra no lo usa): `Rgb(1, %, rise)` relativo
+/// al del módulo, `Rgb(2, px, rise)` absoluto; rise 1 arriba (`<sup>`), 2
+/// abajo (`<sub>`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Size {
+    /// None: el del módulo
+    px: Option<f32>,
+    k: f32,
+    pub rise: u8,
+}
+
+impl Size {
+    const NORMAL: Size = Size { px: None, k: 1.0, rise: 0 };
+
+    fn scaled(self, k: f32) -> Size {
+        Size { k: self.k * k, ..self }
+    }
+
+    fn encode(self) -> Option<Color> {
+        if self == Size::NORMAL {
+            return None;
+        }
+        Some(match self.px {
+            Some(px) => Color::Rgb(2, (px * self.k).round().clamp(1.0, 255.0) as u8, self.rise),
+            None => Color::Rgb(1, (self.k * 100.0).round().clamp(1.0, 255.0) as u8, self.rise),
+        })
+    }
+
+    /// El de una celda (su color de subrayado).
+    pub fn of(c: Color) -> Size {
+        match c {
+            Color::Rgb(1, k, rise) => Size { px: None, k: k as f32 / 100.0, rise },
+            Color::Rgb(2, px, rise) => Size { px: Some(px as f32), k: 1.0, rise },
+            _ => Size::NORMAL,
+        }
+    }
+
+    /// En pixeles, para un módulo de letra `base`; None si es la misma.
+    pub fn px(self, base: f32) -> Option<f32> {
+        let px = (self.px.unwrap_or(base) * self.k).round().max(6.0);
+        (px != base.round()).then_some(px)
+    }
+}
+
+/// `size` de pango: `small`, `x-large`, `smaller`, `120%`, `12pt`, o en
+/// milésimas de punto (`10240`). Un tamaño absoluto en puntos va a pixeles.
+fn pango_size(cur: Size, v: &str) -> Size {
+    let v = v.trim();
+    let k = |n: i32| cur.scaled(1.2f32.powi(n));
+    match v {
+        "xx-small" => Size { px: None, k: 1.2f32.powi(-3), ..cur },
+        "x-small" => Size { px: None, k: 1.2f32.powi(-2), ..cur },
+        "small" => Size { px: None, k: 1.0 / 1.2, ..cur },
+        "medium" => Size { px: None, k: 1.0, ..cur },
+        "large" => Size { px: None, k: 1.2, ..cur },
+        "x-large" => Size { px: None, k: 1.2f32.powi(2), ..cur },
+        "xx-large" => Size { px: None, k: 1.2f32.powi(3), ..cur },
+        "smaller" => k(-1),
+        "larger" => k(1),
+        _ => {
+            if let Some(p) = v.strip_suffix('%').and_then(|p| p.parse::<f32>().ok()) {
+                cur.scaled(p / 100.0)
+            } else if let Some(pt) = v.strip_suffix("pt").and_then(|p| p.trim().parse::<f32>().ok()) {
+                Size { px: Some(pt * 4.0 / 3.0), k: 1.0, ..cur }
+            } else if let Ok(n) = v.parse::<f32>() {
+                Size { px: Some(n / 1024.0 * 4.0 / 3.0), k: 1.0, ..cur }
+            } else {
+                cur
+            }
+        }
+    }
+}
+
+/// `font` de pango (`12`, `Sans Bold 12`, `12px`): solo el tamaño.
+fn pango_font(cur: Size, v: &str) -> Size {
+    let Some(last) = v.split_whitespace().last() else { return cur };
+    if let Some(px) = last.strip_suffix("px").and_then(|p| p.parse::<f32>().ok()) {
+        return Size { px: Some(px), k: 1.0, ..cur };
+    }
+    match last.parse::<f32>() {
+        Ok(pt) => Size { px: Some(pt * 4.0 / 3.0), k: 1.0, ..cur },
+        Err(_) => cur,
+    }
+}
+
 /// El marcado ya relleno, como renglón de la barra con `base` de estilo.
 pub fn line(markup: &str, base: Style, look: &Look) -> Line<'static> {
-    let mut stack = vec![base];
+    let mut stack = vec![(base, Size::NORMAL)];
     let mut spans = Vec::new();
     let mut rest = markup;
     loop {
         let i = rest.find('<').unwrap_or(rest.len());
         if i > 0 {
-            spans.push(Span::styled(unescape(&rest[..i]), *stack.last().unwrap()));
+            spans.push(Span::styled(unescape(&rest[..i]), stack.last().unwrap().0));
         }
         if i == rest.len() {
             break;
         }
         let Some(j) = rest[i..].find('>') else {
-            spans.push(Span::styled(unescape(&rest[i..]), *stack.last().unwrap()));
+            spans.push(Span::styled(unescape(&rest[i..]), stack.last().unwrap().0));
             break;
         };
         let tag = &rest[i + 1..i + j];
@@ -292,12 +379,17 @@ pub fn line(markup: &str, base: Style, look: &Look) -> Line<'static> {
             }
             continue;
         }
-        let mut st = *stack.last().unwrap();
+        let (mut st, mut size) = *stack.last().unwrap();
         let (name, body) = tag.split_once(char::is_whitespace).unwrap_or((tag, ""));
         match name {
             "b" => st = st.add_modifier(Modifier::BOLD),
             "i" => st = st.add_modifier(Modifier::ITALIC),
             "u" => st = st.add_modifier(Modifier::UNDERLINED),
+            "small" => size = size.scaled(1.0 / 1.2),
+            "big" => size = size.scaled(1.2),
+            // como pango 1.50: más chico y arriba (o abajo)
+            "sup" => size = Size { rise: 1, ..size.scaled(0.7) },
+            "sub" => size = Size { rise: 2, ..size.scaled(0.7) },
             _ => {}
         }
         for (k, v) in attrs(body) {
@@ -313,10 +405,13 @@ pub fn line(markup: &str, base: Style, look: &Look) -> Line<'static> {
                     }
                 }
                 "weight" | "font_weight" if v == "bold" => st = st.add_modifier(Modifier::BOLD),
+                "size" | "font_size" => size = pango_size(size, v),
+                "font" | "font_desc" => size = pango_font(size, v),
                 _ => {}
             }
         }
-        stack.push(st);
+        st.underline_color = size.encode().or(stack[0].0.underline_color);
+        stack.push((st, size));
     }
     Line::from(spans)
 }
@@ -341,5 +436,17 @@ mod tests {
         assert_eq!(pick(&i, 0.0), "a");
         assert_eq!(pick(&i, 49.0), "b");
         assert_eq!(pick(&i, 100.0), "d");
+    }
+
+    #[test]
+    fn tamanos() {
+        let look = Look::load("empalme");
+        let size = |m: &str, k: usize| Size::of(line(m, Style::default(), &look).spans[k].style.underline_color.unwrap_or(Color::Reset));
+        assert_eq!(size("<span size='small'>cpu</span> 3%", 0).px(13.0), Some(11.0));
+        assert_eq!(size("<span size='small'>cpu</span> 3%", 1).px(13.0), None);
+        assert_eq!(size("<span font='12'>x</span>", 0).px(13.0), Some(16.0));
+        assert_eq!(size("<span font='8'>x</span>", 0).px(20.0), Some(11.0));
+        let sup = size("a<span foreground='red'><sup>b</sup></span>", 1);
+        assert_eq!((sup.px(20.0), sup.rise), (Some(14.0), 1));
     }
 }
