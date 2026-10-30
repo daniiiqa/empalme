@@ -13,6 +13,7 @@ pub mod notifications;
 pub mod power;
 pub mod recorder;
 pub mod system;
+pub mod text;
 pub mod visualizer;
 pub mod workspaces;
 
@@ -135,6 +136,7 @@ pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
         "network" => Box::new(network::Network::new(conf)),
         "bluetooth" => Box::new(bluetooth::Bluetooth::new(conf)),
         "power" => Box::new(power::Power::new(conf)),
+        "text" => Box::new(text::Text::new(conf)),
         "visualizer" => Box::new(visualizer::Visualizer::new(conf, ctx.tx.clone())),
         "recorder" => Box::new(recorder::Recorder::new(conf)),
         "notifications" => Box::new(notifications::Notifications::new(conf)),

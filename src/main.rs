@@ -883,6 +883,9 @@ fn run() -> Result<(), String> {
     // los nombres de días y meses del reloj, en el idioma del sistema
     unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
 
+    // la marca antes de leer: si el look cambia mientras arranca, se relee
+    let mut bar_stamp = bar::stamp();
+    let mut palette_stamp = fmt::palette_stamp();
     let bar = bar::load();
     let idle = Rc::new(Cell::new(false));
     let ctx = Ctx { idle: idle.clone(), tx: tx.clone() };
@@ -926,9 +929,7 @@ fn run() -> Result<(), String> {
     // las barras salen con cada monitor (new_output)
 
     let mut last_sec = 0;
-    let mut bar_stamp = bar::stamp();
     fmt::load_palette();
-    let mut palette_stamp = fmt::palette_stamp();
     loop {
         // despertar justo al cambiar el segundo, para que el reloj no se salte uno
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
