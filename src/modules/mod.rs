@@ -6,7 +6,9 @@ pub mod audio;
 pub mod battery;
 pub mod bluetooth;
 pub mod clock;
+pub mod idle;
 pub mod network;
+pub mod notifications;
 pub mod power;
 pub mod system;
 pub mod workspaces;
@@ -31,6 +33,7 @@ pub enum Ev {
     Hypr(String),
     Audio,
     Bluetooth(bluetooth::State),
+    Notifications(notifications::State),
     /// una vez por segundo, justo al cambiar el segundo
     Tick,
 }
@@ -46,7 +49,13 @@ pub trait Module {
 
 /// El módulo `name` (`cpu`, o `cpu#otro` para tener dos con distinta
 /// config) con lo que diga su `[bar.modules.<name>]`.
-pub fn make(name: &str, conf: Conf) -> Option<Box<dyn Module>> {
+/// Lo que algunos módulos comparten con la barra.
+pub struct Ctx {
+    /// ¿que la pantalla no se apague? (idle)
+    pub idle: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
     let kind = name.split('#').next().unwrap_or(name);
     Some(match kind {
         "workspaces" => Box::new(workspaces::Workspaces::new()),
@@ -61,6 +70,8 @@ pub fn make(name: &str, conf: Conf) -> Option<Box<dyn Module>> {
         "network" => Box::new(network::Network::new(conf)),
         "bluetooth" => Box::new(bluetooth::Bluetooth::new(conf)),
         "power" => Box::new(power::Power::new(conf)),
+        "notifications" => Box::new(notifications::Notifications::new(conf)),
+        "idle" | "idle_inhibitor" => Box::new(idle::Idle::new(conf, ctx.idle.clone())),
         _ => return None,
     })
 }

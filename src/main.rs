@@ -15,7 +15,7 @@ mod modules;
 use bar::{Bar, Style};
 use discada_kit::look::Look;
 use discada_kit::paint::{Painter, rounded};
-use modules::{Act, Ev, Module};
+use modules::{Act, Ctx, Ev, Module};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use smithay_client_toolkit::reexports::calloop::EventLoop;
@@ -23,7 +23,12 @@ use smithay_client_toolkit::reexports::calloop::channel::{Event, channel};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface};
-use smithay_client_toolkit::reexports::client::{Connection, QueueHandle};
+use smithay_client_toolkit::reexports::client::{Connection, QueueHandle, delegate_noop};
+use smithay_client_toolkit::reexports::protocols::wp::idle_inhibit::zv1::client::{
+    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
+};
+use std::cell::Cell;
+use std::rc::Rc;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_registry,
@@ -74,14 +79,18 @@ struct App {
     /// (sección 0 izquierda, 1 centro, 2 derecha; el módulo)
     modules: Vec<(u8, Box<dyn Module>)>,
     slots: Vec<Slot>,
+    /// el módulo idle dice si se quiere; la barra lo pide al compositor
+    idle: Rc<Cell<bool>>,
+    idle_mgr: Option<ZwpIdleInhibitManagerV1>,
+    inhibitor: Option<ZwpIdleInhibitorV1>,
     qh: QueueHandle<App>,
 }
 
-fn build(bar: &Bar) -> Vec<(u8, Box<dyn Module>)> {
+fn build(bar: &Bar, ctx: &Ctx) -> Vec<(u8, Box<dyn Module>)> {
     let mut out = Vec::new();
     for (sect, names) in [&bar.left, &bar.center, &bar.right].into_iter().enumerate() {
         for name in names {
-            if let Some(m) = modules::make(name, fmt::Conf(bar.modules[name.as_str()].clone())) {
+            if let Some(m) = modules::make(name, fmt::Conf(bar.modules[name.as_str()].clone()), ctx) {
                 out.push((sect as u8, m));
             }
         }
@@ -105,6 +114,27 @@ impl App {
         layer.commit();
         self.layer = Some(layer);
         self.configured = false;
+        // el inhibidor iba con la superficie de antes
+        if let Some(i) = self.inhibitor.take() {
+            i.destroy();
+        }
+        self.sync_idle();
+    }
+
+    /// Que el compositor no apague la pantalla mientras el módulo idle lo pida.
+    fn sync_idle(&mut self) {
+        match (self.idle.get(), &self.inhibitor, &self.idle_mgr, &self.layer) {
+            (true, None, Some(mgr), Some(layer)) => {
+                self.inhibitor = Some(mgr.create_inhibitor(layer.wl_surface(), &self.qh, ()));
+                layer.commit();
+            }
+            (false, Some(_), ..) => {
+                if let Some(i) = self.inhibitor.take() {
+                    i.destroy();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn redraw(&mut self) {
@@ -197,6 +227,7 @@ impl App {
         let rel = col.saturating_sub(sl.start + self.bar.pad);
         let i = sl.module;
         self.modules[i].1.act(act, rel);
+        self.sync_idle();
         // lo que cambia solo con el clic (el reloj largo): de una vez
         self.draw();
     }
@@ -216,7 +247,7 @@ impl App {
         if new_bar {
             self.bar = bar::load();
             self.painter = Painter::sized(self.bar.font_size);
-            self.modules = build(&self.bar);
+            self.modules = build(&self.bar, &Ctx { idle: self.idle.clone() });
             self.layer = None;
             self.pool = None;
             self.create_layer();
@@ -256,11 +287,14 @@ fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     hypr::events(tx.clone());
     modules::audio::watch(tx.clone());
-    modules::bluetooth::watch(tx);
+    modules::bluetooth::watch(tx.clone());
+    modules::notifications::watch(tx);
     // los nombres de días y meses del reloj, en el idioma del sistema
     unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
 
     let bar = bar::load();
+    let idle = Rc::new(Cell::new(false));
+    let ctx = Ctx { idle: idle.clone() };
     let mut app = App {
         registry: RegistryState::new(&globals),
         seat: SeatState::new(&globals, &qh),
@@ -278,9 +312,12 @@ fn run() -> Result<(), String> {
         scroll: 0.0,
         look: Look::load("empalme"),
         painter: Painter::sized(bar.font_size),
-        modules: build(&bar),
+        modules: build(&bar, &ctx),
         bar,
         slots: Vec::new(),
+        idle,
+        idle_mgr: globals.bind::<ZwpIdleInhibitManagerV1, _, _>(&qh, 1..=1, ()).ok(),
+        inhibitor: None,
         qh,
     };
     app.create_layer();
@@ -418,3 +455,5 @@ impl ProvidesRegistryState for App {
 }
 
 smithay_client_toolkit::delegate_dispatch2!(App);
+delegate_noop!(App: ZwpIdleInhibitManagerV1);
+delegate_noop!(App: ZwpIdleInhibitorV1);
