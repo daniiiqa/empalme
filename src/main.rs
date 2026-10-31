@@ -363,8 +363,9 @@ impl App {
         layer.set_anchor(edge | Anchor::LEFT | Anchor::RIGHT);
         let [t, r, bo, l] = b.margin;
         layer.set_margin(t, r, bo, l);
-        // el espacio que reserva: su alto y el margen de su orilla
-        layer.set_exclusive_zone(b.height as i32 + if b.bottom { bo } else { t });
+        // el espacio que reserva: su alto (Hyprland ya le suma el margen de
+        // su orilla, como a waybar; sumarlo aquí lo contaba dos veces)
+        layer.set_exclusive_zone(b.height as i32);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_size(0, b.height);
         layer.commit();
