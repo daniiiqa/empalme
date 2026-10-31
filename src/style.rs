@@ -297,13 +297,18 @@ impl Pill {
 /// La caja de una sección entera (izquierda, centro, derecha), como las
 /// `.modules-left` de waybar: su caja (como un módulo), relleno a cada lado
 /// (`padding`, o `[izquierda, derecha]`), `dots` (un puntito de ese color en
-/// cada orilla) y `underline` (una línea de ese color abajo).
+/// cada orilla) y `underline` (una línea de ese color abajo). Con `slant`
+/// (`left` o `right`) esa orilla va cortada en diagonal, de `slant-width`
+/// pixeles adentro arriba a la esquina de abajo, con un trazo del color de
+/// `underline` encima (las losas de neon).
 #[derive(Clone, Default)]
 pub struct Section {
     pub pill: Pill,
     pub pad: (f32, f32),
     pub dots: Option<String>,
     pub underline: Option<String>,
+    /// la orilla cortada (true: la derecha) y cuánto entra arriba
+    pub slant: Option<(bool, f32)>,
 }
 
 impl Section {
@@ -322,7 +327,8 @@ impl Section {
                 (p, p)
             }
         };
-        Some(Section { pill, pad, dots: s(v, "dots"), underline: s(v, "underline") })
+        let slant = s(v, "slant").filter(|x| x == "left" || x == "right").map(|x| (x == "right", f(v, "slant-width").unwrap_or(22.0)));
+        Some(Section { pill, pad, dots: s(v, "dots"), underline: s(v, "underline"), slant })
     }
 
     /// La caja de x0 a x1 (pixeles del monitor) en una barra de alto `h`.
@@ -330,7 +336,10 @@ impl Section {
     pub fn paint(&self, pix: &mut Pixmap, look: &Look, x0: f32, x1: f32, h: f32, sf: f32, alpha: f32) {
         let p = &self.pill;
         let (top, bot) = ((p.margin[0] * sf).round(), (p.margin[2] * sf).round());
-        p.paint(pix, look, x0, top, x1 - x0, h - top - bot, sf, alpha);
+        match self.slant {
+            Some((right, w)) => self.slab(pix, look, x0, x1, top, h - bot, right, w * sf, sf, alpha),
+            None => p.paint(pix, look, x0, top, x1 - x0, h - top - bot, sf, alpha),
+        }
         if let Some((c, a)) = self.underline.as_deref().and_then(|v| resolve(look, v)) {
             rounded(pix, x0, h - bot - 2.0 * sf, x1 - x0, 2.0 * sf, 0.0, c, a);
         }
@@ -339,6 +348,57 @@ impl Section {
             for cx in [x0 + 5.0 * sf, x1 - 5.0 * sf] {
                 rounded(pix, cx - r, cy - r, 2.0 * r, 2.0 * r, r, c, a);
             }
+        }
+    }
+
+    /// La losa con una orilla en diagonal: el fondo, un brillo tenue hacia
+    /// adentro del corte y el trazo encima (como el degradado de paradas
+    /// duras del CSS de neon).
+    #[allow(clippy::too_many_arguments)]
+    fn slab(&self, pix: &mut Pixmap, look: &Look, x0: f32, x1: f32, y0: f32, y1: f32, right: bool, w: f32, sf: f32, alpha: f32) {
+        use tiny_skia::{FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Point, SpreadMode, Stroke, Transform};
+        // el corte: de (arriba, w adentro) a (abajo, en la esquina)
+        let (a, b) = if right { ((x1 - w, y0), (x1, y1)) } else { ((x0 + w, y0), (x0, y1)) };
+        let poly = |pts: &[(f32, f32)]| {
+            let mut pb = PathBuilder::new();
+            pb.move_to(pts[0].0, pts[0].1);
+            for p in &pts[1..] {
+                pb.line_to(p.0, p.1);
+            }
+            pb.close();
+            pb.finish()
+        };
+        let shape = if right { [(x0, y0), a, b, (x0, y1)] } else { [a, (x1, y0), (x1, y1), b] };
+        let rgba = |c: Color, k: f32| match c {
+            Color::Rgb(r, g, b) => tiny_skia::Color::from_rgba8(r, g, b, (k.clamp(0.0, 1.0) * 255.0) as u8),
+            _ => tiny_skia::Color::TRANSPARENT,
+        };
+        let Some(path) = poly(&shape) else { return };
+        if let Some((c, k)) = self.pill.bg.as_deref().and_then(|v| resolve(look, v)) {
+            let mut paint = Paint::default();
+            paint.set_color(rgba(c, k * alpha));
+            pix.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+        let Some((c, k)) = self.underline.as_deref().and_then(|v| resolve(look, v)) else { return };
+        // hacia adentro, perpendicular al corte
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt().max(1.0);
+        let n = if right { (-dy / len, dx / len) } else { (dy / len, -dx / len) };
+        let glow = 4.0 * sf;
+        let stops = vec![GradientStop::new(0.0, rgba(c, 0.25 * k * alpha)), GradientStop::new(1.0, rgba(c, 0.0))];
+        if let Some(shader) = LinearGradient::new(Point::from_xy(a.0, a.1), Point::from_xy(a.0 + n.0 * glow, a.1 + n.1 * glow), stops, SpreadMode::Pad, Transform::identity()) {
+            let mut paint = Paint::default();
+            paint.shader = shader;
+            pix.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+        let mut pb = PathBuilder::new();
+        pb.move_to(a.0, a.1);
+        pb.line_to(b.0, b.1);
+        if let Some(line) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(rgba(c, k * alpha));
+            paint.anti_alias = true;
+            pix.stroke_path(&line, &paint, &Stroke { width: 1.7 * sf, ..Default::default() }, Transform::identity(), None);
         }
     }
 }
