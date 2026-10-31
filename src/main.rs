@@ -5,7 +5,8 @@
 //!
 //!   empalme            la barra, en cada monitor
 //!
-//! Por ahora corre junto a waybar: `pkill -SIGUSR1 waybar` esconde waybar.
+//! La arranca hypr/scripts/Bar.sh (y la relanza si se cae); SIGUSR1 la
+//! esconde o la muestra (SUPER+CTRL+ALT+B) y SIGUSR2 la rearma.
 
 mod bar;
 mod drawer;
