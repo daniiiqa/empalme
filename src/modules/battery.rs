@@ -162,6 +162,8 @@ impl Module for Battery {
         match act {
             Act::Left => script("Battery.py", &["profile"]),
             Act::Right => script("Battery.py", &["saver"]),
+            // fierro (límites de carga, perfiles), si está
+            Act::Middle => script("TuiApp.sh", &["fierro"]),
             _ => {}
         }
     }
