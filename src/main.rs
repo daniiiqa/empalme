@@ -273,6 +273,9 @@ struct App {
     tip: tooltip::Tip,
     /// el último cuadro del pulso del grabador
     last_pulse: Instant,
+    /// RTMIN+12: revisar los colores ya, sin esperar a que cambie el segundo
+    /// (el telón de farula espera a la barra para abrirse)
+    recheck: bool,
     /// el módulo idle dice si se quiere; la barra lo pide al compositor
     idle: Rc<Cell<bool>>,
     /// para armar de nuevo los módulos (los que lanzan hilos lo necesitan)
@@ -1037,6 +1040,9 @@ fn run() -> Result<(), String> {
     handle
         .insert_source(rx, |ev, _, app: &mut App| {
             if let Event::Msg(ev) = ev {
+                if matches!(ev, Ev::Signal(12)) {
+                    app.recheck = true;
+                }
                 app.on_ev(ev);
             }
         })
@@ -1082,6 +1088,7 @@ fn run() -> Result<(), String> {
         sections: [None, None, None],
         tip: tooltip::Tip::default(),
         last_pulse: Instant::now(),
+        recheck: false,
         bar,
         idle,
         tx,
@@ -1122,9 +1129,12 @@ fn run() -> Result<(), String> {
             }
         }
         let sec = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        if sec != last_sec {
-            last_sec = sec;
-            app.on_ev(Ev::Tick);
+        let recheck = std::mem::take(&mut app.recheck);
+        if sec != last_sec || recheck {
+            if sec != last_sec {
+                last_sec = sec;
+                app.on_ev(Ev::Tick);
+            }
             let mut look_changed = app.look.refresh();
             let ps = fmt::palette_stamp();
             if ps != palette_stamp {
