@@ -295,6 +295,16 @@ fn build(bar: &Bar, ctx: &Ctx) -> Built {
         // `[bar.modules.app]` vale para todos los `app#…`; lo de cada uno encima
         let kind = name.split('#').next().unwrap_or(name);
         let mut v = bar.modules[kind].clone();
+        // picha, sin estilo propio en el look, se viste como el grabador (la otra
+        // pastilla que solo aparece mientras pasa algo); sin sus etiquetas
+        if kind == "picha" && v.is_null() {
+            v = bar.modules["recorder"].clone();
+            if let Some(o) = v.as_object_mut() {
+                for k in ["rec", "paused", "replay", "format", "tooltip-format"] {
+                    o.remove(k);
+                }
+            }
+        }
         if kind != name
             && let (Some(base), Some(own)) = (v.as_object_mut(), bar.modules[name].as_object())
         {

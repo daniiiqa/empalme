@@ -10,6 +10,7 @@ pub mod clock;
 pub mod idle;
 pub mod network;
 pub mod notifications;
+pub mod picha;
 pub mod power;
 pub mod recorder;
 pub mod system;
@@ -150,6 +151,7 @@ pub fn make(name: &str, conf: Conf, ctx: &Ctx) -> Option<Box<dyn Module>> {
         "text" => Box::new(text::Text::new(conf)),
         "visualizer" => Box::new(visualizer::Visualizer::new(conf, ctx.tx.clone())),
         "recorder" => Box::new(recorder::Recorder::new(conf)),
+        "picha" => Box::new(picha::Picha::new(conf)),
         "notifications" => Box::new(notifications::Notifications::new(conf)),
         "idle" | "idle_inhibitor" => Box::new(idle::Idle::new(conf, ctx.idle.clone())),
         _ => return None,
